@@ -1,0 +1,589 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>ダッシュもぐら</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body {
+    display:flex; flex-direction:column; align-items:center; justify-content:center;
+    min-height:100vh;
+    background: linear-gradient(#bfe9ff, #eaf9ff);
+    font-family: "Hiragino Maru Gothic ProN","Comic Sans MS",sans-serif;
+    touch-action: manipulation;
+  }
+  h1 { color:#ff8fab; margin-bottom:10px; text-shadow:1px 1px 0 #fff; }
+  #wrap {
+    position:relative;
+    border-radius:16px;
+    overflow:hidden;
+    box-shadow:0 8px 24px rgba(0,0,0,0.2);
+    border:4px solid #fff;
+  }
+  canvas { display:block; background:#cdefff; }
+  #overlay {
+    position:absolute; inset:0;
+    display:flex; flex-direction:column; align-items:center; justify-content:center;
+    background:rgba(255,255,255,0.85);
+    text-align:center;
+    font-size:20px;
+    color:#555;
+  }
+  #overlay.hidden { display:none; }
+  button {
+    margin-top:14px;
+    padding:10px 24px;
+    font-size:16px;
+    border:none;
+    border-radius:20px;
+    background:#ff8fab;
+    color:#fff;
+    cursor:pointer;
+    box-shadow:0 4px 0 #e06e8c;
+  }
+  button:active { transform:translateY(2px); box-shadow:0 2px 0 #e06e8c; }
+  #hint { margin-top:10px; color:#777; font-size:14px; }
+  #score { position:absolute; top:10px; right:16px; font-size:18px; color:#555; font-weight:bold; text-shadow:1px 1px 0 #fff; }
+</style>
+</head>
+<body>
+<h1>🐾 ダッシュもぐら 🐾</h1>
+<div id="wrap">
+  <canvas id="game" width="800" height="300"></canvas>
+  <div id="score">SCORE: 0</div>
+  <div id="overlay">
+    <div>タップ / クリック / スペースキーでジャンプ！<br>坂道・岩・水たまりを避けよう🐾</div>
+    <button id="startBtn">はじめる</button>
+  </div>
+</div>
+<div id="hint">スペースキー・クリック・タップでジャンプ</div>
+
+<script>
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+const W = canvas.width, H = canvas.height;
+const groundY = 220; // 高さ0(平坦)のときの地面ライン
+const maxHill = 70;  // 坂の最大高さ
+
+const overlay = document.getElementById('overlay');
+const startBtn = document.getElementById('startBtn');
+const scoreEl = document.getElementById('score');
+
+let state = 'ready'; // ready, playing, over
+let speed = 6;
+let baseSpeed = 6;
+let score = 0;
+let frame = 0;
+let scrollX = 0; // これまでに進んだ距離（ワールド座標）
+
+// 猫
+const cat = {
+  x: 90,
+  y: groundY,
+  w: 44,
+  h: 34,
+  vy: 0,
+  onGround: true,
+  jumpPower: -13,
+  gravity: 0.65,
+  legPhase: 0,
+  runFrame: 0,
+  runTimer: 0,
+  falling: false
+};
+
+// 地形（坂・平坦・落とし穴）のセグメント一覧
+let terrainSegments = [];
+let genFrontier = 0;
+let curH = 0;
+
+// 障害物（ブロック・岩）
+let obstacles = []; // {worldX, w, h, type, baseH}
+let nextSpawnDist = 0;
+
+function initTerrain(){
+  terrainSegments = [{x0:0, x1:500, h0:0, h1:0, gap:false}];
+  genFrontier = 500;
+  curH = 0;
+  generateTerrain();
+}
+
+function generateTerrain(){
+  while(genFrontier < scrollX + W + 500){
+    const canUp = curH < maxHill - 15;
+    const canDown = curH > 3;
+    const canGap = curH < 3;
+
+    const weighted = [];
+    for(let i=0;i<3;i++) weighted.push('flat');
+    if(canUp) for(let i=0;i<2;i++) weighted.push('up');
+    if(canDown) for(let i=0;i<2;i++) weighted.push('down');
+    if(canGap) weighted.push('gap');
+
+    const type = weighted[Math.floor(Math.random()*weighted.length)];
+    let len, h0 = curH, h1 = curH, gapFlag = false;
+
+    if(type === 'flat'){
+      len = 100 + Math.random()*150;
+      h1 = curH;
+    } else if(type === 'up'){
+      len = 90 + Math.random()*100;
+      h1 = Math.min(maxHill, curH + 22 + Math.random()*35);
+    } else if(type === 'down'){
+      len = 90 + Math.random()*100;
+      h1 = Math.max(0, curH - (22 + Math.random()*35));
+    } else { // gap
+      len = 55 + Math.random()*45;
+      h0 = 0; h1 = 0; gapFlag = true;
+    }
+
+    terrainSegments.push({x0:genFrontier, x1:genFrontier+len, h0, h1, gap:gapFlag});
+    curH = h1;
+    genFrontier += len;
+  }
+  // 画面より十分後ろのセグメントは破棄
+  terrainSegments = terrainSegments.filter(s => s.x1 > scrollX - 150);
+}
+
+function getHeightAt(wx){
+  for(const seg of terrainSegments){
+    if(wx >= seg.x0 && wx < seg.x1){
+      if(seg.gap) return 0;
+      const t = (wx - seg.x0) / (seg.x1 - seg.x0);
+      return seg.h0 + (seg.h1 - seg.h0) * t;
+    }
+  }
+  return 0;
+}
+
+function isGapAt(wx){
+  for(const seg of terrainSegments){
+    if(wx >= seg.x0 && wx < seg.x1) return !!seg.gap;
+  }
+  return false;
+}
+
+function resetGame(){
+  speed = baseSpeed;
+  score = 0;
+  frame = 0;
+  scrollX = 0;
+  obstacles = [];
+  cat.y = groundY;
+  cat.vy = 0;
+  cat.onGround = true;
+  cat.falling = false;
+  nextSpawnDist = 260;
+  initTerrain();
+}
+
+function jump(){
+  if(state === 'ready'){ startGame(); return; }
+  if(state === 'over'){ return; }
+  if(cat.onGround){
+    cat.vy = cat.jumpPower;
+    cat.onGround = false;
+  }
+}
+
+function startGame(){
+  resetGame();
+  state = 'playing';
+  overlay.classList.add('hidden');
+  loop();
+}
+
+function gameOver(){
+  state = 'over';
+  overlay.classList.remove('hidden');
+  overlay.innerHTML = `<div>💥 ざんねん！<br>スコア: ${Math.floor(score)}</div><button id="retryBtn">もういちど</button>`;
+  document.getElementById('retryBtn').addEventListener('click', startGame);
+}
+
+function spawnObstacle(){
+  const worldX = scrollX + W + 30;
+  // 穴の上には障害物を置かない
+  if(isGapAt(worldX) || isGapAt(worldX+40)) return;
+
+  const isRock = Math.random() < 0.5;
+  const baseH = getHeightAt(worldX);
+  if(isRock){
+    const h = 22 + Math.random()*18;
+    obstacles.push({worldX, w: 30+Math.random()*14, h, type:'rock', baseH});
+  } else {
+    const h = 28 + Math.random()*22;
+    obstacles.push({worldX, w: 24+Math.random()*10, h, type:'block', baseH});
+  }
+}
+
+function update(){
+  frame++;
+  score += speed*0.05;
+  speed = baseSpeed + score*0.01; // 徐々に加速
+
+  scrollX += speed;
+  generateTerrain();
+
+  const worldXAtCat = scrollX + cat.x;
+  const gapHere = isGapAt(worldXAtCat);
+  const surfaceH = getHeightAt(worldXAtCat);
+  const surfaceY = groundY - surfaceH;
+
+  if(cat.onGround){
+    if(gapHere){
+      cat.onGround = false;
+      cat.vy = 0;
+      cat.falling = true; // ジャンプせず水に落ちた＝助からない
+    } else {
+      cat.y = surfaceY;
+      cat.vy = 0;
+    }
+  } else {
+    cat.vy += cat.gravity;
+    cat.y += cat.vy;
+
+    if(cat.falling){
+      // 水/穴に落下確定。そのまま沈んでゲームオーバー
+      if(cat.y > groundY + 45){
+        gameOver();
+        return;
+      }
+    } else if(gapHere){
+      // ジャンプ中に穴の上へ。飛び越えられず沈み始めたら確定
+      if(cat.vy >= 0 && cat.y >= surfaceY){
+        cat.falling = true;
+      }
+    } else if(cat.vy >= 0 && cat.y >= surfaceY){
+      cat.y = surfaceY;
+      cat.vy = 0;
+      cat.onGround = true;
+    }
+  }
+
+  if(!cat.onGround){
+    cat.legPhase = 0;
+  } else {
+    cat.legPhase += 0.5;
+    cat.runTimer += speed;
+    if(cat.runTimer > 60){
+      cat.runTimer = 0;
+      cat.runFrame = cat.runFrame === 0 ? 1 : 0;
+    }
+  }
+
+  // 障害物の後始末とスポーン
+  obstacles = obstacles.filter(o => (o.worldX - scrollX + o.w) > -30);
+  nextSpawnDist -= speed;
+  if(nextSpawnDist <= 0){
+    spawnObstacle();
+    nextSpawnDist = Math.max(180, 380 - score*0.8) + Math.random()*160;
+  }
+
+  // 当たり判定
+  const catBox = {x: cat.x+6, y: cat.y-cat.h+6, w: cat.w-14, h: cat.h-10};
+  for(const o of obstacles){
+    const sx = o.worldX - scrollX;
+    const obTop = groundY - o.baseH - o.h;
+    if(catBox.x < sx+o.w && catBox.x+catBox.w > sx &&
+       catBox.y < obTop+o.h && catBox.y+catBox.h > obTop){
+      gameOver();
+      return;
+    }
+  }
+
+  scoreEl.textContent = 'SCORE: ' + Math.floor(score);
+}
+
+function drawBackground(){
+  ctx.clearRect(0,0,W,H);
+  ctx.fillStyle = 'rgba(255,255,255,0.8)';
+  for(let i=0;i<3;i++){
+    const cx = ((frame*0.4 + i*260) % (W+120)) - 60;
+    drawCloud(cx, 40+i*20);
+  }
+}
+
+function drawCloud(x,y){
+  ctx.beginPath();
+  ctx.arc(x,y,14,0,Math.PI*2);
+  ctx.arc(x+16,y-6,16,0,Math.PI*2);
+  ctx.arc(x+32,y,14,0,Math.PI*2);
+  ctx.fill();
+}
+
+function drawGround(){
+  for(const seg of terrainSegments){
+    const sx0 = seg.x0 - scrollX, sx1 = seg.x1 - scrollX;
+    if(sx1 < 0 || sx0 > W) continue;
+    const cx0 = Math.max(sx0, 0), cx1 = Math.min(sx1, W);
+    const totalLen = seg.x1 - seg.x0;
+
+    if(seg.gap){
+      const grad = ctx.createLinearGradient(0, groundY, 0, H);
+      grad.addColorStop(0, '#5fb0d8');
+      grad.addColorStop(1, '#2a6f96');
+      ctx.fillStyle = grad;
+      ctx.fillRect(cx0, groundY, cx1-cx0, H-groundY);
+      // 水面のきらめき
+      ctx.strokeStyle = 'rgba(255,255,255,0.5)';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(cx0+4, groundY+6);
+      for(let wx2=cx0; wx2<cx1; wx2+=14){
+        ctx.lineTo(wx2+7, groundY+6+Math.sin((wx2+frame*2)*0.15)*2);
+      }
+      ctx.stroke();
+      ctx.fillStyle = '#6bbf5a';
+      ctx.fillRect(sx0-3, groundY-6, 5, 12);
+      ctx.fillRect(sx1-3, groundY-6, 5, 12);
+      continue;
+    }
+
+    const yAt = (sx) => {
+      const wx = sx + scrollX;
+      const t = (wx - seg.x0) / totalLen;
+      return groundY - (seg.h0 + (seg.h1 - seg.h0)*t);
+    };
+    const cy0 = yAt(cx0), cy1 = yAt(cx1);
+
+    ctx.fillStyle = '#8bd67a';
+    ctx.beginPath();
+    ctx.moveTo(cx0, cy0);
+    ctx.lineTo(cx1, cy1);
+    ctx.lineTo(cx1, H);
+    ctx.lineTo(cx0, H);
+    ctx.closePath();
+    ctx.fill();
+
+    ctx.strokeStyle = '#6bbf5a';
+    ctx.lineWidth = 4;
+    ctx.beginPath();
+    ctx.moveTo(cx0, cy0);
+    ctx.lineTo(cx1, cy1);
+    ctx.stroke();
+  }
+
+  // 草模様
+  ctx.fillStyle = '#79cc68';
+  const startOffset = ((scrollX % 40) + 40) % 40;
+  for(let sx = -startOffset; sx < W; sx += 40){
+    const wx = sx + scrollX;
+    if(isGapAt(wx)) continue;
+    const h = getHeightAt(wx);
+    const y = groundY - h;
+    ctx.fillRect(sx, y+4, 18, 4);
+  }
+}
+
+function drawObstacles(){
+  for(const o of obstacles){
+    const sx = o.worldX - scrollX;
+    if(sx < -60 || sx > W+60) continue;
+    const top = groundY - o.baseH - o.h;
+    if(o.type === 'block'){
+      ctx.fillStyle = '#5aa04a';
+      roundRect(sx, top, o.w, o.h, 6);
+      ctx.fill();
+      ctx.fillStyle = '#4a8a3c';
+      roundRect(sx+4, top+4, o.w-8, o.h-8, 4);
+      ctx.fill();
+    } else {
+      // 岩
+      ctx.fillStyle = '#9a9a9a';
+      ctx.beginPath();
+      ctx.ellipse(sx+o.w/2, top+o.h*0.6, o.w/2, o.h*0.55, 0, 0, Math.PI*2);
+      ctx.fill();
+      ctx.beginPath();
+      ctx.ellipse(sx+o.w*0.35, top+o.h*0.35, o.w*0.32, o.h*0.32, 0, 0, Math.PI*2);
+      ctx.fill();
+      ctx.fillStyle = '#7d7d7d';
+      ctx.beginPath();
+      ctx.ellipse(sx+o.w*0.6, top+o.h*0.65, o.w*0.18, o.h*0.14, 0.4, 0, Math.PI*2);
+      ctx.fill();
+      ctx.fillStyle = '#c4c4c4';
+      ctx.beginPath();
+      ctx.ellipse(sx+o.w*0.32, top+o.h*0.4, o.w*0.1, o.h*0.08, 0, 0, Math.PI*2);
+      ctx.fill();
+    }
+  }
+}
+
+function roundRect(x,y,w,h,r){
+  ctx.beginPath();
+  ctx.moveTo(x+r,y);
+  ctx.arcTo(x+w,y,x+w,y+h,r);
+  ctx.arcTo(x+w,y+h,x,y+h,r);
+  ctx.arcTo(x,y+h,x,y,r);
+  ctx.arcTo(x,y,x+w,y,r);
+  ctx.closePath();
+}
+
+function drawCat(){
+  const x = cat.x, y = cat.y - cat.h;
+  const bounce = cat.onGround ? Math.abs(Math.sin(cat.legPhase))*3 : 0;
+
+  ctx.save();
+  ctx.translate(x, y - bounce);
+
+  const bodyColor = '#8d7466';   // ミズラモグラのビロードのような濃茶〜グレー
+  const bodyDark  = '#6f5a4f';
+  const shadeColor = '#5f4c43';
+  const pawColor = '#e7b9a0';    // 掘るための前足（薄いピンクベージュ）
+  const noseColor = '#ff9fb0';
+  const outline = '#4a3b34';
+
+  // しっぽ（短くて先が細い）
+  const tailWag = cat.onGround ? Math.sin(cat.legPhase*1.4)*5 : -6;
+  ctx.strokeStyle = bodyColor;
+  ctx.lineWidth = 5;
+  ctx.lineCap = 'round';
+  ctx.beginPath();
+  ctx.moveTo(6, cat.h*0.6);
+  ctx.quadraticCurveTo(-6, cat.h*0.55 + tailWag*0.4, -11, cat.h*0.48 + tailWag);
+  ctx.stroke();
+
+  // 後ろ足（開閉2フレーム）
+  const isOpenPose = cat.onGround ? (cat.runFrame === 0) : true;
+  ctx.fillStyle = shadeColor;
+  if(isOpenPose){
+    ctx.beginPath();
+    ctx.ellipse(12, cat.h-2, 6, 4, -0.3, 0, Math.PI*2);
+    ctx.fill();
+  } else {
+    ctx.beginPath();
+    ctx.ellipse(cat.w*0.3, cat.h-1, 5, 4, 0, 0, Math.PI*2);
+    ctx.fill();
+  }
+
+  // 体（ずんぐりまんまる）
+  ctx.fillStyle = bodyColor;
+  ctx.beginPath();
+  ctx.ellipse(cat.w*0.44, cat.h*0.6, cat.w*0.4, cat.h*0.42, 0, 0, Math.PI*2);
+  ctx.fill();
+  ctx.strokeStyle = outline;
+  ctx.lineWidth = 1.3;
+  ctx.stroke();
+
+  // お腹（少し明るい毛色）
+  ctx.fillStyle = '#a99182';
+  ctx.beginPath();
+  ctx.ellipse(cat.w*0.4, cat.h*0.72, cat.w*0.22, cat.h*0.22, 0, 0, Math.PI*2);
+  ctx.fill();
+
+  // 前足（腕をつけてから、扇状の爪がある掘る用の手を描く）
+  const pawOffset = isOpenPose ? 3 : -1;
+  const px = cat.w*0.6 + pawOffset;
+  const py = cat.h*0.9;
+
+  // 腕（体とつながって見えるように）
+  ctx.fillStyle = bodyColor;
+  ctx.beginPath();
+  ctx.ellipse(px-1, py-9, 5, 8, 0.15, 0, Math.PI*2);
+  ctx.fill();
+
+  // 手のひら＋扇状の爪
+  ctx.fillStyle = pawColor;
+  ctx.strokeStyle = outline;
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(px-6, py-5);
+  ctx.quadraticCurveTo(px-9, py, px-7, py+4);
+  ctx.lineTo(px-4.5, py+8.5);
+  ctx.lineTo(px-2, py+4.5);
+  ctx.lineTo(px+0.5, py+9.5);
+  ctx.lineTo(px+3, py+4.5);
+  ctx.lineTo(px+5.5, py+8.5);
+  ctx.lineTo(px+7, py+3.5);
+  ctx.quadraticCurveTo(px+9, py, px+6, py-5);
+  ctx.closePath();
+  ctx.fill();
+  ctx.stroke();
+
+  // 頭（先がとがった鼻先に向かって細くなる）
+  const headCx = cat.w*0.68, headCy = cat.h*0.34, headR = cat.h*0.4;
+  ctx.fillStyle = bodyColor;
+  ctx.beginPath();
+  ctx.ellipse(headCx, headCy, headR*0.95, headR*0.85, 0, 0, Math.PI*2);
+  ctx.fill();
+  ctx.strokeStyle = outline;
+  ctx.lineWidth = 1.3;
+  ctx.stroke();
+
+  // 鼻先（ミズラモグラらしい伸びた鼻。ピンクでつやっと）
+  ctx.fillStyle = noseColor;
+  ctx.beginPath();
+  ctx.ellipse(headCx+headR*0.95, headCy+headR*0.12, headR*0.4, headR*0.22, -0.1, 0, Math.PI*2);
+  ctx.fill();
+  ctx.strokeStyle = outline;
+  ctx.lineWidth = 1;
+  ctx.stroke();
+  ctx.fillStyle = '#ff7a94';
+  ctx.beginPath();
+  ctx.arc(headCx+headR*1.28, headCy+headR*0.1, headR*0.09, 0, Math.PI*2);
+  ctx.fill();
+
+  // ひげ（鼻先から数本）
+  ctx.strokeStyle = 'rgba(90,70,60,0.6)';
+  ctx.lineWidth = 1;
+  [-1,0,1].forEach((i)=>{
+    ctx.beginPath();
+    ctx.moveTo(headCx+headR*1.1, headCy+headR*0.15+i*3);
+    ctx.lineTo(headCx+headR*1.7, headCy+headR*0.05+i*6);
+    ctx.stroke();
+  });
+
+  // ほっぺ（ふんわりピンク）
+  ctx.fillStyle = 'rgba(255,160,180,0.35)';
+  ctx.beginPath();
+  ctx.ellipse(headCx+headR*0.35, headCy+headR*0.32, headR*0.25, headR*0.16, 0, 0, Math.PI*2);
+  ctx.fill();
+
+  // 目（モグラらしく小さくてつぶらな一粒）
+  ctx.fillStyle = '#2a211d';
+  ctx.beginPath();
+  ctx.arc(headCx+headR*0.15, headCy-headR*0.15, headR*0.11, 0, Math.PI*2);
+  ctx.fill();
+  ctx.fillStyle = '#fff';
+  ctx.beginPath();
+  ctx.arc(headCx+headR*0.19, headCy-headR*0.2, headR*0.04, 0, Math.PI*2);
+  ctx.fill();
+
+  // 小さい丸耳（毛に半分埋もれている感じ）
+  ctx.fillStyle = bodyDark;
+  ctx.beginPath();
+  ctx.arc(headCx-headR*0.55, headCy-headR*0.4, headR*0.22, 0, Math.PI*2);
+  ctx.fill();
+
+  ctx.restore();
+}
+
+function draw(){
+  drawBackground();
+  drawGround();
+  drawObstacles();
+  drawCat();
+}
+
+function loop(){
+  if(state !== 'playing') return;
+  update();
+  draw();
+  requestAnimationFrame(loop);
+}
+
+// 初期表示
+initTerrain();
+drawBackground();
+drawGround();
+drawCat();
+
+// 入力
+window.addEventListener('keydown', (e)=>{
+  if(e.code === 'Space'){ e.preventDefault(); jump(); }
+});
+canvas.addEventListener('mousedown', jump);
+canvas.addEventListener('touchstart', (e)=>{ e.preventDefault(); jump(); }, {passive:false});
+startBtn.addEventListener('click', startGame);
+</script>
+</body>
+</html>
