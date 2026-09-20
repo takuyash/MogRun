@@ -58,6 +58,12 @@
   button small { display:block; margin-top:2px; font-size:11px; opacity:0.9; }
   button.cave { background:#7a5cff; box-shadow:0 4px 0 #5a3fd6; }
   button.cave:active { box-shadow:0 2px 0 #5a3fd6; }
+  button.lv-easy { background:#4cc38a; box-shadow:0 4px 0 #2f9a68; }
+  button.lv-easy:active { box-shadow:0 2px 0 #2f9a68; }
+  button.lv-hard { background:#ff7a45; box-shadow:0 4px 0 #d95a27; }
+  button.lv-hard:active { box-shadow:0 2px 0 #d95a27; }
+  button.ghost { background:#a3a3a3; box-shadow:0 4px 0 #838383; padding:6px 16px; font-size:13px; }
+  button.ghost:active { box-shadow:0 2px 0 #838383; }
   .btnrow { display:flex; gap:12px; flex-wrap:wrap; justify-content:center; margin-top:14px; }
   #hint { margin-top:10px; color:#777; font-size:14px; text-align:center; }
   #rotate { display:none; margin-top:8px; color:#ff8fab; font-size:14px; font-weight:bold; text-align:center; }
@@ -71,6 +77,11 @@
     #score { font-size:14px; top:6px; right:10px; }
     #stage { font-size:12px; top:7px; left:10px; }
     button { padding:12px 22px; }
+    button[data-level] { padding:10px 8px; font-size:13px; }
+    button.ghost { padding:6px 14px; }
+    button small { display:none; }
+    .btnrow { margin-top:8px; gap:8px; }
+    #overlay .sub { margin-top:4px; }
   }
   /* スマホ縦持ちのときは横向きを案内 */
   @media (orientation:portrait) and (max-width:600px){
@@ -106,8 +117,41 @@ const stageEl = document.getElementById('stage');
 const AUTO_ADVANCE_SCORE = 400;
 const BANNER_FRAMES = 110;
 const STAGE_INFO = {
-  meadow: { label:'STAGE 1 草原', banner:'STAGE 1  草原' },
-  cave:   { label:'STAGE 2 洞窟', banner:'STAGE 2  洞窟' }
+  meadow: { label:'STAGE 1 草原', banner:'STAGE 1  草原', icon:'🌿', name:'草原' },
+  cave:   { label:'STAGE 2 洞窟', banner:'STAGE 2  洞窟', icon:'🕳️', name:'洞窟' }
+};
+
+// ---------- レベル（難易度）設定 ----------
+// baseSpeed/accel   : 走る速さの初期値と、スコアに応じた加速の強さ
+// spacing*          : 障害物どうしの間隔（大きいほどゆったり）
+// gapWeight/gapLen  : 穴（水たまり・溶岩）の出やすさと長さ [最小, ばらつき]
+// gemChance         : 洞窟で宝石が出る確率
+// dark              : 洞窟の暗さ（inner=明るい範囲の半径, alpha=まわりの暗さ）
+const LEVELS = {
+  easy: {
+    name:'かんたん', emoji:'🐣',
+    baseSpeed:5, accel:0.007,
+    spacingBase:460, spacingSlope:0.6, spacingMin:260, spacingRand:180,
+    gapWeight:0.5, gapLen:[45, 30],
+    gemChance:0.9, dark:{ inner:120, alpha:0.5 },
+    desc:{ meadow:'ゆっくり・穴すくなめ', cave:'ゆっくり・明るめ' }
+  },
+  normal: {
+    name:'ふつう', emoji:'🐾',
+    baseSpeed:6, accel:0.01,
+    spacingBase:380, spacingSlope:0.8, spacingMin:180, spacingRand:160,
+    gapWeight:1, gapLen:[55, 45],
+    gemChance:0.75, dark:{ inner:90, alpha:0.68 },
+    desc:{ meadow:'ふつうの速さ', cave:'ふつうの速さ' }
+  },
+  hard: {
+    name:'むずかしい', emoji:'🔥',
+    baseSpeed:7, accel:0.013,
+    spacingBase:330, spacingSlope:1.0, spacingMin:170, spacingRand:120,
+    gapWeight:1.6, gapLen:[60, 55],
+    gemChance:0.6, dark:{ inner:70, alpha:0.8 },
+    desc:{ meadow:'はやい・穴おおめ', cave:'はやい・まっくら' }
+  }
 };
 const CAVE_CRYSTALS = ['#7de3ff', '#ff8ad8', '#b69cff'];
 // 洞窟の障害物は先端がとがっているので、当たり判定を少し内側にする（0.22 = 左右22%ずつ）
@@ -115,6 +159,21 @@ const HIT_INSET = { stalagmite: 0.22, crystal: 0.1 };
 
 let stageKey = 'meadow';   // いま遊んでいるステージ
 let startStage = 'meadow'; // 「もういちど」で戻るステージ
+let levelKey = 'normal';   // いま遊んでいるレベル
+let startLevel = 'normal'; // 「もういちど」で戻るレベル
+let pendingStage = 'meadow'; // レベル選択中のステージ
+let menuStep = 'stage';      // 'stage' | 'level'
+
+function levelMenuHTML(stage){
+  const st = STAGE_INFO[stage];
+  const btns = Object.keys(LEVELS).map(k => {
+    const lv = LEVELS[k];
+    return `<button data-level="${k}" class="lv-${k}">${lv.emoji} ${lv.name}<small>${lv.desc[stage]}</small></button>`;
+  }).join('');
+  return `<div>${st.icon} ${st.name}ステージ<br><span class="sub">むずかしさをえらんでね</span></div>` +
+    `<div class="btnrow">${btns}</div>` +
+    '<div class="btnrow"><button id="backBtn" class="ghost">← もどる</button></div>';
+}
 
 const MENU_HTML =
   '<div>タップ / クリック / スペースキーでジャンプ！<br>坂道・岩・水たまりを避けよう🐾' +
@@ -185,14 +244,20 @@ function generateTerrain(){
     const canDown = curH > 3;
     const canGap = curH < 3;
 
-    const weighted = [];
-    for(let i=0;i<3;i++) weighted.push('flat');
-    if(canUp) for(let i=0;i<2;i++) weighted.push('up');
-    if(canDown) for(let i=0;i<2;i++) weighted.push('down');
-    // 洞窟は溶岩の穴が多め
-    if(canGap) for(let i=0;i<(stageKey === 'cave' ? 2 : 1);i++) weighted.push('gap');
+    const lv = LEVELS[levelKey];
+    // 洞窟は溶岩の穴が多め。さらにレベルで穴の出やすさが変わる
+    const gapW = (stageKey === 'cave' ? 2 : 1) * lv.gapWeight;
+    const table = [['flat', 3]];
+    if(canUp) table.push(['up', 2]);
+    if(canDown) table.push(['down', 2]);
+    if(canGap) table.push(['gap', gapW]);
 
-    const type = weighted[Math.floor(Math.random()*weighted.length)];
+    let roll = Math.random() * table.reduce((s, e) => s + e[1], 0);
+    let type = table[table.length-1][0];
+    for(const [t, w] of table){
+      if(roll < w){ type = t; break; }
+      roll -= w;
+    }
     let len, h0 = curH, h1 = curH, gapFlag = false;
 
     if(type === 'flat'){
@@ -205,7 +270,7 @@ function generateTerrain(){
       len = 90 + Math.random()*100;
       h1 = Math.max(0, curH - (22 + Math.random()*35));
     } else { // gap
-      len = 55 + Math.random()*45;
+      len = lv.gapLen[0] + Math.random()*lv.gapLen[1];
       h0 = 0; h1 = 0; gapFlag = true;
     }
 
@@ -236,17 +301,20 @@ function isGapAt(wx){
 }
 
 function applyStageUI(){
-  stageEl.textContent = STAGE_INFO[stageKey].label;
+  stageEl.textContent = STAGE_INFO[stageKey].label + ' ・ ' + LEVELS[levelKey].name;
   wrap.classList.toggle('cave', stageKey === 'cave');
 }
 
 function showBanner(){
   banner.text = STAGE_INFO[stageKey].banner;
+  banner.sub = LEVELS[levelKey].emoji + ' ' + LEVELS[levelKey].name;
   banner.t = BANNER_FRAMES;
 }
 
 function resetGame(){
   stageKey = startStage;
+  levelKey = startLevel;
+  baseSpeed = LEVELS[levelKey].baseSpeed;
   speed = baseSpeed;
   score = 0;
   bonus = 0;
@@ -268,7 +336,10 @@ function resetGame(){
 }
 
 function jump(){
-  if(state === 'ready'){ startGame(); return; }
+  if(state === 'ready'){
+    if(menuStep === 'stage') startGame(); // ステージ画面ならタップで前回の設定ですぐ開始
+    return;
+  }
   if(state === 'over'){ return; }
   if(cat.onGround){
     cat.vy = cat.jumpPower;
@@ -276,8 +347,9 @@ function jump(){
   }
 }
 
-function startGame(key){
-  if(typeof key === 'string') startStage = key;
+function startGame(stage, level){
+  if(typeof stage === 'string') startStage = stage;
+  if(typeof level === 'string') startLevel = level;
   resetGame();
   state = 'playing';
   overlay.classList.add('hidden');
@@ -287,8 +359,15 @@ function startGame(key){
 
 function showMenu(){
   state = 'ready';
+  menuStep = 'stage';
   overlay.innerHTML = MENU_HTML;
   overlay.classList.remove('hidden');
+}
+
+function showLevelMenu(stage){
+  pendingStage = stage;
+  menuStep = 'level';
+  overlay.innerHTML = levelMenuHTML(stage);
 }
 
 function gameOver(){
@@ -296,7 +375,7 @@ function gameOver(){
   overlay.classList.remove('hidden');
   const total = Math.floor(score + bonus);
   overlay.innerHTML =
-    `<div>💥 ざんねん！<br>${STAGE_INFO[stageKey].label}<br>スコア: ${total}</div>` +
+    `<div>💥 ざんねん！<br>${STAGE_INFO[stageKey].label} ・ ${LEVELS[levelKey].name}<br>スコア: ${total}</div>` +
     '<div class="btnrow"><button id="retryBtn">もういちど</button>' +
     '<button id="menuBtn" class="cave">ステージ選択</button></div>';
 }
@@ -343,7 +422,7 @@ function spawnObstacle(){
            hue: Math.floor(Math.random()*CAVE_CRYSTALS.length)};
     }
     obstacles.push(o);
-    if(Math.random() < 0.75) spawnGems(worldX + o.w + 40);
+    if(Math.random() < LEVELS[levelKey].gemChance) spawnGems(worldX + o.w + 40);
     return;
   }
 
@@ -370,7 +449,7 @@ function spawnGems(fromX){
 function update(){
   frame++;
   score += speed*0.05;
-  speed = baseSpeed + score*0.01; // 徐々に加速
+  speed = baseSpeed + score*LEVELS[levelKey].accel; // 徐々に加速
 
   scrollX += speed;
   generateTerrain();
@@ -439,7 +518,8 @@ function update(){
   nextSpawnDist -= speed;
   if(nextSpawnDist <= 0 && !gatePending()){
     spawnObstacle();
-    nextSpawnDist = Math.max(180, 380 - score*0.8) + Math.random()*160;
+    const lv = LEVELS[levelKey];
+    nextSpawnDist = Math.max(lv.spacingMin, lv.spacingBase - score*lv.spacingSlope) + Math.random()*lv.spacingRand;
   }
 
   // 当たり判定
@@ -1047,10 +1127,11 @@ function drawCat(){
 // ---------- 描画：洞窟のライティング ----------
 function drawCaveLighting(){
   // まわりを暗く（もぐらのライトの周りだけ明るい）
-  const vg = ctx.createRadialGradient(lamp.x, lamp.y, 90, lamp.x, lamp.y, 460);
+  const dk = LEVELS[levelKey].dark;
+  const vg = ctx.createRadialGradient(lamp.x, lamp.y, dk.inner, lamp.x, lamp.y, 460);
   vg.addColorStop(0, 'rgba(6,3,14,0)');
-  vg.addColorStop(0.45, 'rgba(6,3,14,0.25)');
-  vg.addColorStop(1, 'rgba(6,3,14,0.68)');
+  vg.addColorStop(0.45, `rgba(6,3,14,${(dk.alpha*0.37).toFixed(3)})`);
+  vg.addColorStop(1, `rgba(6,3,14,${dk.alpha})`);
   ctx.fillStyle = vg;
   ctx.fillRect(0, 0, W, H);
 
@@ -1145,6 +1226,12 @@ function drawEffects(){
     ctx.strokeText(banner.text, W/2, 100);
     ctx.fillStyle = '#fff';
     ctx.fillText(banner.text, W/2, 100);
+    if(banner.sub){
+      ctx.font = 'bold 20px "Hiragino Maru Gothic ProN","Comic Sans MS",sans-serif';
+      ctx.lineWidth = 5;
+      ctx.strokeText(banner.sub, W/2, 134);
+      ctx.fillText(banner.sub, W/2, 134);
+    }
     ctx.globalAlpha = 1;
     ctx.textBaseline = 'alphabetic';
   }
@@ -1199,7 +1286,9 @@ wrap.addEventListener('pointerdown', (e)=>{
 overlay.addEventListener('click', (e)=>{
   const b = e.target.closest('button');
   if(!b) return;
-  if(b.dataset.stage) startGame(b.dataset.stage);
+  if(b.dataset.stage) showLevelMenu(b.dataset.stage);
+  else if(b.dataset.level) startGame(pendingStage, b.dataset.level);
+  else if(b.id === 'backBtn') showMenu();
   else if(b.id === 'retryBtn') startGame();
   else if(b.id === 'menuBtn') showMenu();
 });
