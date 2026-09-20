@@ -64,12 +64,15 @@
   button.lv-hard:active { box-shadow:0 2px 0 #d95a27; }
   button.ghost { background:#a3a3a3; box-shadow:0 4px 0 #838383; padding:6px 16px; font-size:13px; }
   button.ghost:active { box-shadow:0 2px 0 #838383; }
+  button.sky { background:#3fa4ff; box-shadow:0 4px 0 #2381d6; }
+  button.sky:active { box-shadow:0 2px 0 #2381d6; }
   .btnrow { display:flex; gap:12px; flex-wrap:wrap; justify-content:center; margin-top:14px; }
   #hint { margin-top:10px; color:#777; font-size:14px; text-align:center; }
   #rotate { display:none; margin-top:8px; color:#ff8fab; font-size:14px; font-weight:bold; text-align:center; }
   #score { position:absolute; top:10px; right:16px; font-size:18px; color:#555; font-weight:bold; text-shadow:1px 1px 0 #fff; }
   #stage { position:absolute; top:10px; left:16px; font-size:14px; color:#555; font-weight:bold; text-shadow:1px 1px 0 #fff; }
   #wrap.cave #score, #wrap.cave #stage { color:#f3e9ff; text-shadow:1px 1px 0 #000; }
+  #wrap.sky #score, #wrap.sky #stage { color:#fff; text-shadow:1px 1px 0 rgba(0,80,150,0.75); }
 
   @media (max-width:600px){
     h1 { font-size:20px; margin-bottom:8px; }
@@ -78,6 +81,7 @@
     #stage { font-size:12px; top:7px; left:10px; }
     button { padding:12px 22px; }
     button[data-level] { padding:10px 8px; font-size:13px; }
+    button[data-stage] { padding:10px 12px; font-size:14px; }
     button.ghost { padding:6px 14px; }
     button small { display:none; }
     .btnrow { margin-top:8px; gap:8px; }
@@ -113,13 +117,24 @@ const scoreEl = document.getElementById('score');
 const stageEl = document.getElementById('stage');
 
 // ---------- ステージ設定 ----------
-// 草原でこのスコアに達すると洞窟の入り口が現れて、洞窟ステージへ進む（nullで無効）
-const AUTO_ADVANCE_SCORE = 400;
+// 自動ステージ進行：草原 → 洞窟 → 空。各ステージに入ってから dist 点進むと入り口が現れる
+// 自動で進ませたくない場合は AUTO_ADVANCE を false にする
+const AUTO_ADVANCE = true;
+const ADVANCE = {
+  meadow: { to:'cave', dist:400 },
+  cave:   { to:'sky',  dist:500 }
+};
 const BANNER_FRAMES = 110;
 const STAGE_INFO = {
   meadow: { label:'STAGE 1 草原', banner:'STAGE 1  草原', icon:'🌿', name:'草原' },
   cave:   { label:'STAGE 2 洞窟', banner:'STAGE 2  洞窟', icon:'🕳️', name:'洞窟' }
 };
+
+STAGE_INFO.sky = { label:'STAGE 3 空', banner:'STAGE 3  空', icon:'☁️', name:'空' };
+// 穴の出やすさ（ステージ別の倍率）
+STAGE_INFO.meadow.gapMul = 1;
+STAGE_INFO.cave.gapMul = 2;
+STAGE_INFO.sky.gapMul = 1.5;
 
 // ---------- レベル（難易度）設定 ----------
 // baseSpeed/accel   : 走る速さの初期値と、スコアに応じた加速の強さ
@@ -155,7 +170,11 @@ const LEVELS = {
 };
 const CAVE_CRYSTALS = ['#7de3ff', '#ff8ad8', '#b69cff'];
 // 洞窟の障害物は先端がとがっているので、当たり判定を少し内側にする（0.22 = 左右22%ずつ）
-const HIT_INSET = { stalagmite: 0.22, crystal: 0.1 };
+const HIT_INSET = { stalagmite: 0.22, crystal: 0.1, stormcloud: 0.1, tornado: 0.15 };
+
+LEVELS.easy.desc.sky = 'ゆっくり・穴すくなめ';
+LEVELS.normal.desc.sky = 'ふつうの速さ';
+LEVELS.hard.desc.sky = 'はやい・穴おおめ';
 
 let stageKey = 'meadow';   // いま遊んでいるステージ
 let startStage = 'meadow'; // 「もういちど」で戻るステージ
@@ -179,8 +198,9 @@ const MENU_HTML =
   '<div>タップ / クリック / スペースキーでジャンプ！<br>坂道・岩・水たまりを避けよう🐾' +
   '<br><span class="sub">ステージをえらんでね</span></div>' +
   '<div class="btnrow">' +
-    '<button data-stage="meadow">🌿 草原ステージ<small>坂道と水たまりを走ろう</small></button>' +
-    '<button data-stage="cave" class="cave">🕳️ 洞窟ステージ<small>暗い洞窟で宝石を集めよう</small></button>' +
+    '<button data-stage="meadow">🌿 草原<small>坂道と水たまり</small></button>' +
+    '<button data-stage="cave" class="cave">🕳️ 洞窟<small>暗闇で宝石あつめ</small></button>' +
+    '<button data-stage="sky" class="sky">☁️ 空<small>雲の上をかけぬけろ</small></button>' +
   '</div>';
 
 let state = 'ready'; // ready, playing, over
@@ -225,6 +245,8 @@ let nextSpawnDist = 0;
 let gate = null;    // 洞窟の入り口 {x, w}
 let fade = 0;       // 黒フェード
 let banner = { text:'', t:0 };
+let stageStartScore = 0; // 今のステージに入った時点のスコア
+let fadeColor = '0,0,0'; // 切り替え時のフェードの色（洞窟=黒、空=白）
 
 function hash(n){
   const s = Math.sin(n*127.1 + 311.7) * 43758.5453;
@@ -246,7 +268,7 @@ function generateTerrain(){
 
     const lv = LEVELS[levelKey];
     // 洞窟は溶岩の穴が多め。さらにレベルで穴の出やすさが変わる
-    const gapW = (stageKey === 'cave' ? 2 : 1) * lv.gapWeight;
+    const gapW = STAGE_INFO[stageKey].gapMul * lv.gapWeight;
     const table = [['flat', 3]];
     if(canUp) table.push(['up', 2]);
     if(canDown) table.push(['down', 2]);
@@ -303,6 +325,7 @@ function isGapAt(wx){
 function applyStageUI(){
   stageEl.textContent = STAGE_INFO[stageKey].label + ' ・ ' + LEVELS[levelKey].name;
   wrap.classList.toggle('cave', stageKey === 'cave');
+  wrap.classList.toggle('sky', stageKey === 'sky');
 }
 
 function showBanner(){
@@ -325,6 +348,8 @@ function resetGame(){
   pops = [];
   gate = null;
   fade = 0;
+  fadeColor = '0,0,0';
+  stageStartScore = 0;
   cat.y = groundY;
   cat.vy = 0;
   cat.onGround = true;
@@ -387,20 +412,23 @@ function tryPlaceGate(){
     if(isGapAt(x)) return; // 穴の近くには置かない
   }
   if(Math.abs(getHeightAt(gx) - getHeightAt(gx + 90)) > 10) return; // ほぼ平らな場所だけ
-  gate = { x: gx, w: 90 };
+  gate = { x: gx, w: 90, to: ADVANCE[stageKey].to };
 }
 
-function enterCave(){
-  stageKey = 'cave';
+function enterStage(to){
+  stageKey = to;
+  stageStartScore = score;
   gate = null;
   fade = 1;
+  fadeColor = (to === 'sky') ? '255,255,255' : '0,0,0';
   nextSpawnDist = 320;
   applyStageUI();
   showBanner();
 }
 
 function gatePending(){
-  return !!AUTO_ADVANCE_SCORE && stageKey === 'meadow' && score >= AUTO_ADVANCE_SCORE;
+  const adv = ADVANCE[stageKey];
+  return AUTO_ADVANCE && !!adv && (score - stageStartScore) >= adv.dist;
 }
 
 // ---------- 障害物・宝石 ----------
@@ -410,6 +438,20 @@ function spawnObstacle(){
   if(isGapAt(worldX) || isGapAt(worldX+40)) return;
 
   const baseH = getHeightAt(worldX);
+
+  if(stageKey === 'sky'){
+    let o;
+    if(Math.random() < 0.55){
+      const h = 26 + Math.random()*12;
+      o = {worldX, w: 34+Math.random()*12, h, type:'stormcloud', baseH};
+    } else {
+      const h = 42 + Math.random()*14;
+      o = {worldX, w: 22+Math.random()*8, h, type:'tornado', baseH};
+    }
+    obstacles.push(o);
+    if(Math.random() < LEVELS[levelKey].gemChance) spawnGems(worldX + o.w + 40);
+    return;
+  }
 
   if(stageKey === 'cave'){
     let o;
@@ -454,10 +496,10 @@ function update(){
   scrollX += speed;
   generateTerrain();
 
-  // 草原 → 洞窟の切り替え
-  if(AUTO_ADVANCE_SCORE && stageKey === 'meadow'){
-    if(!gate && score >= AUTO_ADVANCE_SCORE) tryPlaceGate();
-    if(gate && scrollX + cat.x >= gate.x + gate.w*0.5) enterCave();
+  // 草原 → 洞窟 → 空 の切り替え
+  if(AUTO_ADVANCE && ADVANCE[stageKey]){
+    if(!gate && gatePending()) tryPlaceGate();
+    if(gate && scrollX + cat.x >= gate.x + gate.w*0.5) enterStage(gate.to);
   }
   if(fade > 0) fade = Math.max(0, fade - 0.025);
   if(banner.t > 0) banner.t--;
@@ -482,7 +524,7 @@ function update(){
 
     if(cat.falling){
       // 水/穴に落下確定。そのまま沈んでゲームオーバー
-      if(cat.y > groundY + 45){
+      if(cat.y > (stageKey === 'sky' ? H + 60 : groundY + 45)){
         gameOver();
         return;
       }
@@ -554,6 +596,7 @@ function update(){
 // ---------- 描画：草原 ----------
 function drawBackground(){
   if(stageKey === 'cave'){ drawCaveBackground(); return; }
+  if(stageKey === 'sky'){ drawSkyBackground(); return; }
   ctx.clearRect(0,0,W,H);
   ctx.fillStyle = 'rgba(255,255,255,0.8)';
   for(let i=0;i<3;i++){
@@ -650,6 +693,7 @@ function drawStalactites(L, withCrystals){
 
 // ---------- 描画：地面 ----------
 function drawGround(){
+  if(stageKey === 'sky'){ drawSkyGround(); return; }
   const cave = stageKey === 'cave';
   let caveGrad = null;
   if(cave){
@@ -769,6 +813,7 @@ function drawGate(){
   const sx = gate.x - scrollX, w = gate.w;
   if(sx < -140 || sx > W+40) return;
   const base = groundY - getHeightAt(gate.x + w/2);
+  if(gate.to === 'sky'){ drawPortal(sx, w, base); return; }
   const top = base - 150;
 
   // 岩のかたまり
@@ -817,6 +862,248 @@ function drawGate(){
   ctx.textBaseline = 'alphabetic';
 }
 
+// ---------- 描画：空ステージ ----------
+function puff(x, y, sc){
+  ctx.beginPath();
+  const parts = [[0,0,14],[16,-7,17],[34,0,15],[18,5,13]];
+  for(const [dx,dy,r] of parts){
+    ctx.moveTo(x + dx*sc + r*sc, y + dy*sc);
+    ctx.arc(x + dx*sc, y + dy*sc, r*sc, 0, Math.PI*2);
+  }
+  ctx.fill();
+}
+
+function drawCloudLayer(sp, spacing, alpha, baseY, range, scale, seed){
+  const off = scrollX * sp;
+  const first = Math.floor(off/spacing) - 1;
+  ctx.fillStyle = `rgba(255,255,255,${alpha})`;
+  for(let i = first; i < first + Math.ceil(W/spacing) + 4; i++){
+    const x = i*spacing - off + (hash(i*3+seed)-0.5)*spacing*0.5;
+    const y = baseY + hash(i*5+seed+1)*range;
+    const sc = scale*(0.7 + hash(i*7+seed+2)*0.7);
+    puff(x, y, sc);
+  }
+}
+
+function drawSkyBackground(){
+  const g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, '#3d9bff');
+  g.addColorStop(0.6, '#8fd0ff');
+  g.addColorStop(1, '#d6f0ff');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, W, H);
+
+  // 太陽
+  const sg = ctx.createRadialGradient(690, 58, 10, 690, 58, 90);
+  sg.addColorStop(0, 'rgba(255,248,200,0.9)');
+  sg.addColorStop(0.35, 'rgba(255,240,170,0.35)');
+  sg.addColorStop(1, 'rgba(255,240,170,0)');
+  ctx.fillStyle = sg;
+  ctx.beginPath(); ctx.arc(690, 58, 90, 0, Math.PI*2); ctx.fill();
+  ctx.fillStyle = '#fff8c8';
+  ctx.beginPath(); ctx.arc(690, 58, 26, 0, Math.PI*2); ctx.fill();
+
+  // 遠くの雲（真ん中の層は、雲の切れ目から下に見える）
+  drawCloudLayer(0.12, 230, 0.45, 20, 90, 1.3, 3);
+  drawCloudLayer(0.22, 200, 0.75, 215, 55, 1.7, 11);
+  drawCloudLayer(0.32, 170, 0.8, 30, 80, 0.95, 21);
+
+  // 鳥
+  ctx.strokeStyle = '#3b6fa6';
+  ctx.lineWidth = 2;
+  ctx.lineCap = 'round';
+  for(let i = 0; i < 3; i++){
+    const bx = W + 60 - ((scrollX*0.7 + i*330) % (W + 120));
+    const by = 55 + i*38 + Math.sin(frame*0.05 + i*2)*6;
+    const flap = Math.sin(frame*0.25 + i)*5;
+    ctx.beginPath();
+    ctx.moveTo(bx - 9, by - flap*0.5);
+    ctx.quadraticCurveTo(bx - 4, by - 4 - flap, bx, by);
+    ctx.quadraticCurveTo(bx + 4, by - 4 - flap, bx + 9, by - flap*0.5);
+    ctx.stroke();
+  }
+}
+
+function drawSkyGround(){
+  const grad = ctx.createLinearGradient(0, groundY - maxHill, 0, H);
+  grad.addColorStop(0, '#ffffff');
+  grad.addColorStop(0.5, '#e8f4ff');
+  grad.addColorStop(1, '#b9dcff');
+
+  for(const seg of terrainSegments){
+    const sx0 = seg.x0 - scrollX, sx1 = seg.x1 - scrollX;
+    if(sx1 < -20 || sx0 > W+20) continue;
+
+    if(seg.gap){
+      // 雲の切れ目：ふちをまるくする
+      for(const ex of [sx0, sx1]){
+        for(let y = groundY + 4; y < H + 20; y += 20){
+          ctx.fillStyle = y < groundY + 30 ? '#ffffff' : '#e3f1ff';
+          ctx.beginPath(); ctx.arc(ex, y, 12, 0, Math.PI*2); ctx.fill();
+        }
+      }
+      continue;
+    }
+
+    const cx0 = Math.max(sx0, 0), cx1 = Math.min(sx1, W);
+    const total = seg.x1 - seg.x0;
+    const yAt = (sx) => groundY - (seg.h0 + (seg.h1 - seg.h0)*((sx + scrollX - seg.x0)/total));
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.moveTo(cx0, yAt(cx0));
+    ctx.lineTo(cx1, yAt(cx1));
+    ctx.lineTo(cx1, H);
+    ctx.lineTo(cx0, H);
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  // 雲のふわふわ（かげ → 白の順に描く）
+  const startOffset = ((scrollX % 22) + 22) % 22;
+  const puffs = [];
+  for(let sx = -startOffset - 22; sx < W + 22; sx += 22){
+    const wx = sx + scrollX;
+    if(isGapAt(wx)) continue;
+    const idx = Math.round(wx/22);
+    puffs.push({ sx, y: groundY - getHeightAt(wx) + 9, r: 10 + hash(idx)*5 });
+  }
+  ctx.fillStyle = '#dbeeff';
+  for(const p of puffs){ ctx.beginPath(); ctx.arc(p.sx, p.y + 3, p.r, 0, Math.PI*2); ctx.fill(); }
+  ctx.fillStyle = '#ffffff';
+  for(const p of puffs){ ctx.beginPath(); ctx.arc(p.sx, p.y, p.r, 0, Math.PI*2); ctx.fill(); }
+}
+
+function drawWindStreaks(){
+  ctx.strokeStyle = 'rgba(255,255,255,0.6)';
+  ctx.lineWidth = 2;
+  ctx.lineCap = 'round';
+  for(let i = 0; i < 7; i++){
+    const d = scrollX*1.6 + i*173;
+    const lap = Math.floor(d/(W + 160));
+    const x = W + 80 - (d % (W + 160));
+    const y = 30 + hash(i*7 + lap*13)*230;
+    const len = 30 + hash(i*3 + lap*5)*40;
+    ctx.beginPath();
+    ctx.moveTo(x, y);
+    ctx.lineTo(x + len, y);
+    ctx.stroke();
+  }
+}
+
+function drawStar(cx, cy, r){
+  ctx.fillStyle = 'rgba(255,245,170,0.35)';
+  ctx.beginPath(); ctx.arc(cx, cy, r*1.9, 0, Math.PI*2); ctx.fill();
+  ctx.beginPath();
+  for(let k = 0; k < 10; k++){
+    const rad = (k % 2 === 0) ? r*1.15 : r*0.5;
+    const ang = -Math.PI/2 + k*Math.PI/5;
+    const px = cx + Math.cos(ang)*rad, py = cy + Math.sin(ang)*rad;
+    if(k === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+  }
+  ctx.closePath();
+  ctx.fillStyle = '#ffe066';
+  ctx.strokeStyle = '#d99a00';
+  ctx.lineWidth = 1.3;
+  ctx.fill();
+  ctx.stroke();
+}
+
+function drawStormcloud(sx, top, o){
+  const puffsDef = [[0.28,0.62,0.42],[0.52,0.42,0.5],[0.76,0.62,0.38],[0.5,0.78,0.42]];
+  ctx.fillStyle = '#5d667c';
+  for(const [px, py, pr] of puffsDef){
+    ctx.beginPath(); ctx.arc(sx + o.w*px, top + o.h*py, o.h*pr, 0, Math.PI*2); ctx.fill();
+  }
+  ctx.fillStyle = '#7e889f';
+  for(const [px, py, pr] of puffsDef){
+    ctx.beginPath(); ctx.arc(sx + o.w*px - 2, top + o.h*py - 3, o.h*pr*0.6, 0, Math.PI*2); ctx.fill();
+  }
+  // いなずま（ときどきピカッ）
+  const flash = (Math.floor(frame/8) + Math.floor(o.worldX)) % 6 === 0;
+  ctx.fillStyle = flash ? '#fff35c' : '#e6c93a';
+  const cx = sx + o.w*0.5;
+  ctx.beginPath();
+  ctx.moveTo(cx + 2, top + o.h*0.3);
+  ctx.lineTo(cx - 5, top + o.h*0.62);
+  ctx.lineTo(cx, top + o.h*0.62);
+  ctx.lineTo(cx - 4, top + o.h*0.95);
+  ctx.lineTo(cx + 6, top + o.h*0.52);
+  ctx.lineTo(cx + 1, top + o.h*0.52);
+  ctx.closePath();
+  ctx.fill();
+}
+
+function drawTornado(sx, top, o){
+  const n = 6;
+  const by = top + o.h + 4;
+  ctx.lineWidth = 1;
+  ctx.strokeStyle = '#6f7f9f';
+  for(let k = n-1; k >= 0; k--){
+    const t = k/(n-1);
+    const hw = o.w*(0.12 + 0.38*t);
+    const y = by - t*(o.h + 4);
+    const cx = sx + o.w/2 + Math.sin(frame*0.2 + k*0.9)*3*(0.3 + t);
+    ctx.fillStyle = (k % 2 === 0) ? '#cbd5e8' : '#a3b2cf';
+    ctx.beginPath();
+    ctx.ellipse(cx, y, hw, 5, 0, 0, Math.PI*2);
+    ctx.fill();
+    ctx.stroke();
+  }
+}
+
+function drawPortal(sx, w, base){
+  const cx = sx + w/2, cy = base - 62;
+  // まわりの光
+  const gl = ctx.createRadialGradient(cx, cy, 10, cx, cy, 95);
+  gl.addColorStop(0, 'rgba(255,255,255,0.85)');
+  gl.addColorStop(0.4, 'rgba(170,220,255,0.45)');
+  gl.addColorStop(1, 'rgba(170,220,255,0)');
+  ctx.fillStyle = gl;
+  ctx.beginPath(); ctx.arc(cx, cy, 95, 0, Math.PI*2); ctx.fill();
+  // まわる光線
+  ctx.save();
+  ctx.translate(cx, cy);
+  ctx.rotate(frame*0.02);
+  ctx.fillStyle = 'rgba(255,255,255,0.35)';
+  for(let k = 0; k < 8; k++){
+    ctx.rotate(Math.PI/4);
+    ctx.beginPath();
+    ctx.moveTo(0, 0);
+    ctx.lineTo(-7, -85);
+    ctx.lineTo(7, -85);
+    ctx.closePath();
+    ctx.fill();
+  }
+  ctx.restore();
+  // 輪
+  ctx.strokeStyle = '#fff6c2';
+  ctx.lineWidth = 7;
+  ctx.beginPath(); ctx.ellipse(cx, cy, 34, 58, 0, 0, Math.PI*2); ctx.stroke();
+  ctx.strokeStyle = '#ffd84a';
+  ctx.lineWidth = 2.5;
+  ctx.stroke();
+  // 中は青空
+  const ig = ctx.createLinearGradient(0, cy-58, 0, cy+58);
+  ig.addColorStop(0, '#eaf6ff');
+  ig.addColorStop(1, '#8fd0ff');
+  ctx.fillStyle = ig;
+  ctx.beginPath(); ctx.ellipse(cx, cy, 31, 55, 0, 0, Math.PI*2); ctx.fill();
+  // 看板
+  ctx.fillStyle = '#b8895a';
+  roundRect(cx-25, cy-92, 50, 22, 5);
+  ctx.fill();
+  ctx.strokeStyle = '#7d5a35';
+  ctx.lineWidth = 2;
+  ctx.stroke();
+  ctx.fillStyle = '#fff6e0';
+  ctx.font = 'bold 14px "Hiragino Maru Gothic ProN","Comic Sans MS",sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText('空へ', cx, cy-80.5);
+  ctx.textAlign = 'start';
+  ctx.textBaseline = 'alphabetic';
+}
+
 // ---------- 描画：障害物・宝石 ----------
 function drawObstacles(){
   for(const o of obstacles){
@@ -851,6 +1138,10 @@ function drawObstacles(){
       drawStalagmite(sx, top, o);
     } else if(o.type === 'crystal'){
       drawCrystal(sx, top, o);
+    } else if(o.type === 'stormcloud'){
+      drawStormcloud(sx, top, o);
+    } else if(o.type === 'tornado'){
+      drawTornado(sx, top, o);
     }
   }
 }
@@ -931,6 +1222,7 @@ function drawGems(){
     const bob = Math.sin((frame + g.phase)*0.1)*3;
     const y = g.y + bob;
     const s = 9 + Math.sin((frame + g.phase)*0.15)*1.2;
+    if(stageKey === 'sky'){ drawStar(sx, y, s); continue; }
     ctx.fillStyle = '#ffd84a';
     ctx.strokeStyle = '#b57a00';
     ctx.lineWidth = 1.2;
@@ -1118,6 +1410,32 @@ function drawCat(){
     ctx.stroke();
   }
 
+  // 空ではプロペラ付きの帽子
+  if(stageKey === 'sky'){
+    const capY = headCy - headR*0.3;
+    ctx.fillStyle = '#ff5d73';
+    ctx.strokeStyle = outline;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.arc(headCx, capY, headR*0.92, Math.PI*1.02, Math.PI*1.98);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(headCx - headR*0.16, headCy - headR*1.12, headR*0.32, headR*0.76);
+    ctx.fillStyle = '#c93a52';
+    ctx.fillRect(headCx - headR*1.02, headCy - headR*0.35, headR*2.0, 3);
+    // プロペラ（くるくる回る）
+    const topY = capY - headR*0.92;
+    ctx.strokeStyle = '#6b6b6b';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.moveTo(headCx, topY + 1); ctx.lineTo(headCx, topY - 4); ctx.stroke();
+    const bl = headR*1.15*Math.cos(frame*0.7);
+    ctx.strokeStyle = '#ffd84a';
+    ctx.lineWidth = 2.5;
+    ctx.beginPath(); ctx.moveTo(headCx - bl, topY - 4); ctx.lineTo(headCx + bl, topY - 4); ctx.stroke();
+  }
+
   ctx.restore();
 
   lamp.x = x + headCx + headR*0.8;
@@ -1162,6 +1480,19 @@ function drawCaveLighting(){
     lg.addColorStop(1, 'rgba(255,120,40,0.35)');
     ctx.fillStyle = lg;
     ctx.fillRect(x0, groundY-70, x1-x0, 80);
+  }
+
+  // 空へのゲートの光（暗闇の中でも目立つように）
+  if(gate && gate.to === 'sky'){
+    const gx = gate.x - scrollX + gate.w/2;
+    const gy = groundY - getHeightAt(gate.x + gate.w/2) - 62;
+    if(gx > -120 && gx < W + 120){
+      const pg = ctx.createRadialGradient(gx, gy, 10, gx, gy, 120);
+      pg.addColorStop(0, 'rgba(210,235,255,0.55)');
+      pg.addColorStop(1, 'rgba(210,235,255,0)');
+      ctx.fillStyle = pg;
+      ctx.beginPath(); ctx.arc(gx, gy, 120, 0, Math.PI*2); ctx.fill();
+    }
   }
 
   // 水晶の光
@@ -1211,7 +1542,7 @@ function drawEffects(){
   ctx.globalAlpha = 1;
 
   if(fade > 0){
-    ctx.fillStyle = `rgba(0,0,0,${fade})`;
+    ctx.fillStyle = `rgba(${fadeColor},${fade})`;
     ctx.fillRect(0, 0, W, H);
   }
 
@@ -1245,6 +1576,7 @@ function draw(){
   drawObstacles();
   drawGems();
   drawCat();
+  if(stageKey === 'sky') drawWindStreaks();
   if(stageKey === 'cave') drawCaveLighting();
   drawEffects();
 }
