@@ -11,6 +11,8 @@
     min-height:100vh;
     min-height:100dvh;
     padding:8px;
+    padding-top:max(8px, env(safe-area-inset-top));
+    padding-bottom:max(8px, env(safe-area-inset-bottom));
     padding-left:max(8px, env(safe-area-inset-left));
     padding-right:max(8px, env(safe-area-inset-right));
     background: linear-gradient(#bfe9ff, #eaf9ff);
@@ -41,8 +43,8 @@
     padding:8px;
   }
   #overlay.hidden { display:none; }
+  #overlay .sub { display:inline-block; margin-top:8px; font-size:0.8em; color:#888; }
   button {
-    margin-top:14px;
     padding:10px 24px;
     font-size:16px;
     border:none;
@@ -53,15 +55,22 @@
     box-shadow:0 4px 0 #e06e8c;
   }
   button:active { transform:translateY(2px); box-shadow:0 2px 0 #e06e8c; }
+  button small { display:block; margin-top:2px; font-size:11px; opacity:0.9; }
+  button.cave { background:#7a5cff; box-shadow:0 4px 0 #5a3fd6; }
+  button.cave:active { box-shadow:0 2px 0 #5a3fd6; }
+  .btnrow { display:flex; gap:12px; flex-wrap:wrap; justify-content:center; margin-top:14px; }
   #hint { margin-top:10px; color:#777; font-size:14px; text-align:center; }
   #rotate { display:none; margin-top:8px; color:#ff8fab; font-size:14px; font-weight:bold; text-align:center; }
   #score { position:absolute; top:10px; right:16px; font-size:18px; color:#555; font-weight:bold; text-shadow:1px 1px 0 #fff; }
+  #stage { position:absolute; top:10px; left:16px; font-size:14px; color:#555; font-weight:bold; text-shadow:1px 1px 0 #fff; }
+  #wrap.cave #score, #wrap.cave #stage { color:#f3e9ff; text-shadow:1px 1px 0 #000; }
 
   @media (max-width:600px){
     h1 { font-size:20px; margin-bottom:8px; }
     #overlay { font-size:15px; }
     #score { font-size:14px; top:6px; right:10px; }
-    button { padding:12px 28px; }
+    #stage { font-size:12px; top:7px; left:10px; }
+    button { padding:12px 22px; }
   }
   /* スマホ縦持ちのときは横向きを案内 */
   @media (orientation:portrait) and (max-width:600px){
@@ -73,11 +82,9 @@
 <h1>🐾 ダッシュもぐら 🐾</h1>
 <div id="wrap">
   <canvas id="game" width="800" height="300"></canvas>
+  <div id="stage">STAGE 1 草原</div>
   <div id="score">SCORE: 0</div>
-  <div id="overlay">
-    <div>タップ / クリック / スペースキーでジャンプ！<br>坂道・岩・水たまりを避けよう🐾</div>
-    <button id="startBtn">はじめる</button>
-  </div>
+  <div id="overlay"></div>
 </div>
 <div id="rotate">📱 スマホを横向きにすると遊びやすいよ！</div>
 <div id="hint">スペースキー・クリック・タップでジャンプ</div>
@@ -91,13 +98,37 @@ const maxHill = 70;  // 坂の最大高さ
 
 const wrap = document.getElementById('wrap');
 const overlay = document.getElementById('overlay');
-const startBtn = document.getElementById('startBtn');
 const scoreEl = document.getElementById('score');
+const stageEl = document.getElementById('stage');
+
+// ---------- ステージ設定 ----------
+// 草原でこのスコアに達すると洞窟の入り口が現れて、洞窟ステージへ進む（nullで無効）
+const AUTO_ADVANCE_SCORE = 400;
+const BANNER_FRAMES = 110;
+const STAGE_INFO = {
+  meadow: { label:'STAGE 1 草原', banner:'STAGE 1  草原' },
+  cave:   { label:'STAGE 2 洞窟', banner:'STAGE 2  洞窟' }
+};
+const CAVE_CRYSTALS = ['#7de3ff', '#ff8ad8', '#b69cff'];
+// 洞窟の障害物は先端がとがっているので、当たり判定を少し内側にする（0.22 = 左右22%ずつ）
+const HIT_INSET = { stalagmite: 0.22, crystal: 0.1 };
+
+let stageKey = 'meadow';   // いま遊んでいるステージ
+let startStage = 'meadow'; // 「もういちど」で戻るステージ
+
+const MENU_HTML =
+  '<div>タップ / クリック / スペースキーでジャンプ！<br>坂道・岩・水たまりを避けよう🐾' +
+  '<br><span class="sub">ステージをえらんでね</span></div>' +
+  '<div class="btnrow">' +
+    '<button data-stage="meadow">🌿 草原ステージ<small>坂道と水たまりを走ろう</small></button>' +
+    '<button data-stage="cave" class="cave">🕳️ 洞窟ステージ<small>暗い洞窟で宝石を集めよう</small></button>' +
+  '</div>';
 
 let state = 'ready'; // ready, playing, over
 let speed = 6;
 let baseSpeed = 6;
 let score = 0;
+let bonus = 0;       // 宝石ボーナス（加速には影響しない）
 let frame = 0;
 let scrollX = 0; // これまでに進んだ距離（ワールド座標）
 
@@ -120,15 +151,26 @@ const cat = {
   runTimer: 0,
   falling: false
 };
+const lamp = { x:0, y:0 }; // ヘルメットのライトの画面座標
 
 // 地形（坂・平坦・落とし穴）のセグメント一覧
 let terrainSegments = [];
 let genFrontier = 0;
 let curH = 0;
 
-// 障害物（ブロック・岩）
+// 障害物・宝石・演出
 let obstacles = []; // {worldX, w, h, type, baseH}
+let gems = [];      // {worldX, y, phase, taken}
+let pops = [];      // {x, y, t}
 let nextSpawnDist = 0;
+let gate = null;    // 洞窟の入り口 {x, w}
+let fade = 0;       // 黒フェード
+let banner = { text:'', t:0 };
+
+function hash(n){
+  const s = Math.sin(n*127.1 + 311.7) * 43758.5453;
+  return s - Math.floor(s);
+}
 
 function initTerrain(){
   terrainSegments = [{x0:0, x1:500, h0:0, h1:0, gap:false}];
@@ -147,7 +189,8 @@ function generateTerrain(){
     for(let i=0;i<3;i++) weighted.push('flat');
     if(canUp) for(let i=0;i<2;i++) weighted.push('up');
     if(canDown) for(let i=0;i<2;i++) weighted.push('down');
-    if(canGap) weighted.push('gap');
+    // 洞窟は溶岩の穴が多め
+    if(canGap) for(let i=0;i<(stageKey === 'cave' ? 2 : 1);i++) weighted.push('gap');
 
     const type = weighted[Math.floor(Math.random()*weighted.length)];
     let len, h0 = curH, h1 = curH, gapFlag = false;
@@ -192,18 +235,36 @@ function isGapAt(wx){
   return false;
 }
 
+function applyStageUI(){
+  stageEl.textContent = STAGE_INFO[stageKey].label;
+  wrap.classList.toggle('cave', stageKey === 'cave');
+}
+
+function showBanner(){
+  banner.text = STAGE_INFO[stageKey].banner;
+  banner.t = BANNER_FRAMES;
+}
+
 function resetGame(){
+  stageKey = startStage;
   speed = baseSpeed;
   score = 0;
+  bonus = 0;
   frame = 0;
   scrollX = 0;
   obstacles = [];
+  gems = [];
+  pops = [];
+  gate = null;
+  fade = 0;
   cat.y = groundY;
   cat.vy = 0;
   cat.onGround = true;
   cat.falling = false;
   nextSpawnDist = 260;
   initTerrain();
+  applyStageUI();
+  showBanner();
 }
 
 function jump(){
@@ -215,7 +276,8 @@ function jump(){
   }
 }
 
-function startGame(){
+function startGame(key){
+  if(typeof key === 'string') startStage = key;
   resetGame();
   state = 'playing';
   overlay.classList.add('hidden');
@@ -223,26 +285,85 @@ function startGame(){
   requestAnimationFrame(loop);
 }
 
+function showMenu(){
+  state = 'ready';
+  overlay.innerHTML = MENU_HTML;
+  overlay.classList.remove('hidden');
+}
+
 function gameOver(){
   state = 'over';
   overlay.classList.remove('hidden');
-  overlay.innerHTML = `<div>💥 ざんねん！<br>スコア: ${Math.floor(score)}</div><button id="retryBtn">もういちど</button>`;
-  document.getElementById('retryBtn').addEventListener('click', startGame);
+  const total = Math.floor(score + bonus);
+  overlay.innerHTML =
+    `<div>💥 ざんねん！<br>${STAGE_INFO[stageKey].label}<br>スコア: ${total}</div>` +
+    '<div class="btnrow"><button id="retryBtn">もういちど</button>' +
+    '<button id="menuBtn" class="cave">ステージ選択</button></div>';
 }
 
+// ---------- 洞窟の入り口（草原 → 洞窟） ----------
+function tryPlaceGate(){
+  const gx = scrollX + W + 220;
+  for(let x = gx - 50; x <= gx + 140; x += 10){
+    if(isGapAt(x)) return; // 穴の近くには置かない
+  }
+  if(Math.abs(getHeightAt(gx) - getHeightAt(gx + 90)) > 10) return; // ほぼ平らな場所だけ
+  gate = { x: gx, w: 90 };
+}
+
+function enterCave(){
+  stageKey = 'cave';
+  gate = null;
+  fade = 1;
+  nextSpawnDist = 320;
+  applyStageUI();
+  showBanner();
+}
+
+function gatePending(){
+  return !!AUTO_ADVANCE_SCORE && stageKey === 'meadow' && score >= AUTO_ADVANCE_SCORE;
+}
+
+// ---------- 障害物・宝石 ----------
 function spawnObstacle(){
   const worldX = scrollX + W + 30;
   // 穴の上には障害物を置かない
   if(isGapAt(worldX) || isGapAt(worldX+40)) return;
 
-  const isRock = Math.random() < 0.5;
   const baseH = getHeightAt(worldX);
+
+  if(stageKey === 'cave'){
+    let o;
+    if(Math.random() < 0.55){
+      const h = 30 + Math.random()*24;
+      o = {worldX, w: 22+Math.random()*10, h, type:'stalagmite', baseH};
+    } else {
+      const h = 26 + Math.random()*16;
+      o = {worldX, w: 30+Math.random()*12, h, type:'crystal', baseH,
+           hue: Math.floor(Math.random()*CAVE_CRYSTALS.length)};
+    }
+    obstacles.push(o);
+    if(Math.random() < 0.75) spawnGems(worldX + o.w + 40);
+    return;
+  }
+
+  const isRock = Math.random() < 0.5;
   if(isRock){
     const h = 22 + Math.random()*18;
     obstacles.push({worldX, w: 30+Math.random()*14, h, type:'rock', baseH});
   } else {
     const h = 28 + Math.random()*22;
     obstacles.push({worldX, w: 24+Math.random()*10, h, type:'block', baseH});
+  }
+}
+
+function spawnGems(fromX){
+  const n = Math.random() < 0.5 ? 3 : 5;
+  for(let k=0; k<n; k++){
+    const wx = fromX + k*22;
+    const arc = Math.sin(k/(n-1)*Math.PI) * 22;
+    const y = groundY - getHeightAt(wx) - 42 - arc;
+    gems.push({worldX: wx, y, phase: Math.random()*60, taken:false});
   }
 }
 
@@ -254,6 +375,14 @@ function update(){
   scrollX += speed;
   generateTerrain();
 
+  // 草原 → 洞窟の切り替え
+  if(AUTO_ADVANCE_SCORE && stageKey === 'meadow'){
+    if(!gate && score >= AUTO_ADVANCE_SCORE) tryPlaceGate();
+    if(gate && scrollX + cat.x >= gate.x + gate.w*0.5) enterCave();
+  }
+  if(fade > 0) fade = Math.max(0, fade - 0.025);
+  if(banner.t > 0) banner.t--;
+
   const worldXAtCat = scrollX + cat.x;
   const gapHere = isGapAt(worldXAtCat);
   const surfaceH = getHeightAt(worldXAtCat);
@@ -263,7 +392,7 @@ function update(){
     if(gapHere){
       cat.onGround = false;
       cat.vy = 0;
-      cat.falling = true; // ジャンプせず水に落ちた＝助からない
+      cat.falling = true; // ジャンプせず水(溶岩)に落ちた＝助からない
     } else {
       cat.y = surfaceY;
       cat.vy = 0;
@@ -303,8 +432,12 @@ function update(){
 
   // 障害物の後始末とスポーン
   obstacles = obstacles.filter(o => (o.worldX - scrollX + o.w) > -30);
+  gems = gems.filter(g => !g.taken && (g.worldX - scrollX) > -30);
+  pops = pops.filter(p => p.t < 40);
+  for(const p of pops) p.t++;
+
   nextSpawnDist -= speed;
-  if(nextSpawnDist <= 0){
+  if(nextSpawnDist <= 0 && !gatePending()){
     spawnObstacle();
     nextSpawnDist = Math.max(180, 380 - score*0.8) + Math.random()*160;
   }
@@ -314,17 +447,33 @@ function update(){
   for(const o of obstacles){
     const sx = o.worldX - scrollX;
     const obTop = groundY - o.baseH - o.h;
-    if(catBox.x < sx+o.w && catBox.x+catBox.w > sx &&
+    const ins = HIT_INSET[o.type] || 0;
+    const ox = sx + o.w*ins, ow = o.w*(1 - ins*2);
+    if(catBox.x < ox+ow && catBox.x+catBox.w > ox &&
        catBox.y < obTop+o.h && catBox.y+catBox.h > obTop){
       gameOver();
       return;
     }
   }
 
-  scoreEl.textContent = 'SCORE: ' + Math.floor(score);
+  // 宝石の取得
+  for(const g of gems){
+    if(g.taken) continue;
+    const sx = g.worldX - scrollX;
+    if(sx > catBox.x - 10 && sx < catBox.x + catBox.w + 10 &&
+       g.y > catBox.y - 10 && g.y < catBox.y + catBox.h + 10){
+      g.taken = true;
+      bonus += 10;
+      pops.push({x: sx, y: g.y, t: 0});
+    }
+  }
+
+  scoreEl.textContent = 'SCORE: ' + Math.floor(score + bonus);
 }
 
+// ---------- 描画：草原 ----------
 function drawBackground(){
+  if(stageKey === 'cave'){ drawCaveBackground(); return; }
   ctx.clearRect(0,0,W,H);
   ctx.fillStyle = 'rgba(255,255,255,0.8)';
   for(let i=0;i<3;i++){
@@ -341,7 +490,94 @@ function drawCloud(x,y){
   ctx.fill();
 }
 
+// ---------- 描画：洞窟の背景 ----------
+const CAVE_LAYERS = [
+  { sp:0.25, spacing:90,  color:'#231a2d', minL:40, maxL:95, w:26, seed:1 },
+  { sp:0.5,  spacing:64,  color:'#33273f', minL:25, maxL:70, w:20, seed:7 },
+  { sp:0.9,  spacing:110, color:'#150f1c', minL:30, maxL:60, w:22, seed:13 }
+];
+
+function drawCaveBackground(){
+  const g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, '#141019');
+  g.addColorStop(0.55, '#231a2e');
+  g.addColorStop(1, '#2f2238');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, W, H);
+
+  drawBackStalagmites();
+  drawStalactites(CAVE_LAYERS[0], false);
+  drawStalactites(CAVE_LAYERS[1], true);
+  drawStalactites(CAVE_LAYERS[2], false);
+
+  ctx.fillStyle = '#120d18';
+  ctx.fillRect(0, 0, W, 12);
+}
+
+function drawBackStalagmites(){
+  const sp = 0.4, spacing = 130, off = scrollX*sp;
+  const first = Math.floor(off/spacing) - 1;
+  ctx.fillStyle = '#2a2035';
+  for(let i = first; i < first + Math.ceil(W/spacing) + 4; i++){
+    const x = i*spacing - off + (hash(i*3+5)-0.5)*50;
+    const len = 30 + hash(i*5+2)*55;
+    const w = 26 + hash(i*7+9)*14;
+    ctx.beginPath();
+    ctx.moveTo(x - w, groundY + 30);
+    ctx.lineTo(x + w, groundY + 30);
+    ctx.lineTo(x, groundY - len);
+    ctx.closePath();
+    ctx.fill();
+  }
+}
+
+function drawStalactites(L, withCrystals){
+  const off = scrollX * L.sp;
+  const first = Math.floor(off/L.spacing) - 1;
+  for(let i = first; i < first + Math.ceil(W/L.spacing) + 4; i++){
+    const x = i*L.spacing - off + (hash(i*3+L.seed)-0.5)*L.spacing*0.4;
+    const len = L.minL + hash(i*5+L.seed+1)*(L.maxL-L.minL);
+    const w = L.w*(0.7 + hash(i*7+L.seed+2)*0.6);
+    const tipX = x + (hash(i+L.seed)-0.5)*8;
+    ctx.fillStyle = L.color;
+    ctx.beginPath();
+    ctx.moveTo(x - w, 0);
+    ctx.lineTo(x + w, 0);
+    ctx.lineTo(tipX, len);
+    ctx.closePath();
+    ctx.fill();
+
+    // つららの先で光る水晶
+    if(withCrystals && hash(i*11+L.seed) > 0.62){
+      const col = CAVE_CRYSTALS[Math.floor(hash(i*13+L.seed)*CAVE_CRYSTALS.length)];
+      const tw = 0.6 + 0.4*Math.sin(frame*0.08 + i);
+      ctx.fillStyle = col;
+      ctx.globalAlpha = 0.12*tw;
+      ctx.beginPath(); ctx.arc(tipX, len+2, 15, 0, Math.PI*2); ctx.fill();
+      ctx.globalAlpha = 0.25*tw;
+      ctx.beginPath(); ctx.arc(tipX, len+2, 8, 0, Math.PI*2); ctx.fill();
+      ctx.globalAlpha = 1;
+      ctx.beginPath();
+      ctx.moveTo(tipX, len - 3);
+      ctx.lineTo(tipX + 3.5, len + 3);
+      ctx.lineTo(tipX, len + 9);
+      ctx.lineTo(tipX - 3.5, len + 3);
+      ctx.closePath();
+      ctx.fill();
+    }
+  }
+}
+
+// ---------- 描画：地面 ----------
 function drawGround(){
+  const cave = stageKey === 'cave';
+  let caveGrad = null;
+  if(cave){
+    caveGrad = ctx.createLinearGradient(0, groundY - maxHill, 0, H);
+    caveGrad.addColorStop(0, '#6a5a58');
+    caveGrad.addColorStop(1, '#30262c');
+  }
+
   for(const seg of terrainSegments){
     const sx0 = seg.x0 - scrollX, sx1 = seg.x1 - scrollX;
     if(sx1 < 0 || sx0 > W) continue;
@@ -349,23 +585,53 @@ function drawGround(){
     const totalLen = seg.x1 - seg.x0;
 
     if(seg.gap){
-      const grad = ctx.createLinearGradient(0, groundY, 0, H);
-      grad.addColorStop(0, '#5fb0d8');
-      grad.addColorStop(1, '#2a6f96');
-      ctx.fillStyle = grad;
-      ctx.fillRect(cx0, groundY, cx1-cx0, H-groundY);
-      // 水面のきらめき
-      ctx.strokeStyle = 'rgba(255,255,255,0.5)';
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-      ctx.moveTo(cx0+4, groundY+6);
-      for(let wx2=cx0; wx2<cx1; wx2+=14){
-        ctx.lineTo(wx2+7, groundY+6+Math.sin((wx2+frame*2)*0.15)*2);
+      if(cave){
+        // 溶岩
+        const grad = ctx.createLinearGradient(0, groundY, 0, H);
+        grad.addColorStop(0, '#ffb347');
+        grad.addColorStop(0.35, '#ff6a2b');
+        grad.addColorStop(1, '#8a1c0c');
+        ctx.fillStyle = grad;
+        ctx.fillRect(cx0, groundY, cx1-cx0, H-groundY);
+        ctx.strokeStyle = 'rgba(255,240,170,0.75)';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(cx0+4, groundY+6);
+        for(let wx2=cx0; wx2<cx1; wx2+=14){
+          ctx.lineTo(wx2+7, groundY+6+Math.sin((wx2+scrollX+frame*2)*0.15)*2);
+        }
+        ctx.stroke();
+        // ぼこぼこ泡
+        ctx.fillStyle = 'rgba(255,225,140,0.85)';
+        for(let k=0;k<3;k++){
+          const bx = seg.x0 + hash(seg.x0*0.13 + k)*totalLen - scrollX;
+          if(bx < 0 || bx > W) continue;
+          const by = H - ((frame*0.6 + hash(seg.x0 + k*9)*60) % (H-groundY));
+          ctx.beginPath(); ctx.arc(bx, by, 3, 0, Math.PI*2); ctx.fill();
+        }
+        // ふちの岩
+        ctx.fillStyle = '#3a2f33';
+        ctx.fillRect(sx0-3, groundY-6, 5, 12);
+        ctx.fillRect(sx1-3, groundY-6, 5, 12);
+      } else {
+        const grad = ctx.createLinearGradient(0, groundY, 0, H);
+        grad.addColorStop(0, '#5fb0d8');
+        grad.addColorStop(1, '#2a6f96');
+        ctx.fillStyle = grad;
+        ctx.fillRect(cx0, groundY, cx1-cx0, H-groundY);
+        // 水面のきらめき
+        ctx.strokeStyle = 'rgba(255,255,255,0.5)';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(cx0+4, groundY+6);
+        for(let wx2=cx0; wx2<cx1; wx2+=14){
+          ctx.lineTo(wx2+7, groundY+6+Math.sin((wx2+frame*2)*0.15)*2);
+        }
+        ctx.stroke();
+        ctx.fillStyle = '#6bbf5a';
+        ctx.fillRect(sx0-3, groundY-6, 5, 12);
+        ctx.fillRect(sx1-3, groundY-6, 5, 12);
       }
-      ctx.stroke();
-      ctx.fillStyle = '#6bbf5a';
-      ctx.fillRect(sx0-3, groundY-6, 5, 12);
-      ctx.fillRect(sx1-3, groundY-6, 5, 12);
       continue;
     }
 
@@ -376,7 +642,7 @@ function drawGround(){
     };
     const cy0 = yAt(cx0), cy1 = yAt(cx1);
 
-    ctx.fillStyle = '#8bd67a';
+    ctx.fillStyle = cave ? caveGrad : '#8bd67a';
     ctx.beginPath();
     ctx.moveTo(cx0, cy0);
     ctx.lineTo(cx1, cy1);
@@ -385,7 +651,7 @@ function drawGround(){
     ctx.closePath();
     ctx.fill();
 
-    ctx.strokeStyle = '#6bbf5a';
+    ctx.strokeStyle = cave ? '#8f7b76' : '#6bbf5a';
     ctx.lineWidth = 4;
     ctx.beginPath();
     ctx.moveTo(cx0, cy0);
@@ -393,18 +659,85 @@ function drawGround(){
     ctx.stroke();
   }
 
-  // 草模様
-  ctx.fillStyle = '#79cc68';
+  // 草模様 / 小石模様
   const startOffset = ((scrollX % 40) + 40) % 40;
   for(let sx = -startOffset; sx < W; sx += 40){
     const wx = sx + scrollX;
     if(isGapAt(wx)) continue;
     const h = getHeightAt(wx);
     const y = groundY - h;
-    ctx.fillRect(sx, y+4, 18, 4);
+    if(cave){
+      const idx = Math.round(wx/40);
+      ctx.fillStyle = '#3f343a';
+      ctx.beginPath();
+      ctx.ellipse(sx+9, y+9+hash(idx)*4, 7, 3, 0, 0, Math.PI*2);
+      ctx.fill();
+      if(hash(idx*3+1) > 0.5){
+        ctx.fillStyle = '#7d6a68';
+        ctx.fillRect(sx+22, y+7+hash(idx*5)*6, 4, 2);
+      }
+    } else {
+      ctx.fillStyle = '#79cc68';
+      ctx.fillRect(sx, y+4, 18, 4);
+    }
   }
 }
 
+// ---------- 描画：洞窟の入り口 ----------
+function drawGate(){
+  if(!gate) return;
+  const sx = gate.x - scrollX, w = gate.w;
+  if(sx < -140 || sx > W+40) return;
+  const base = groundY - getHeightAt(gate.x + w/2);
+  const top = base - 150;
+
+  // 岩のかたまり
+  ctx.fillStyle = '#8a8378';
+  ctx.beginPath();
+  ctx.moveTo(sx-26, H);
+  ctx.lineTo(sx-26, base-10);
+  ctx.quadraticCurveTo(sx-26, top, sx+w/2, top);
+  ctx.quadraticCurveTo(sx+w+26, top, sx+w+26, base-10);
+  ctx.lineTo(sx+w+26, H);
+  ctx.closePath();
+  ctx.fill();
+  ctx.strokeStyle = '#6b6459';
+  ctx.lineWidth = 3;
+  ctx.stroke();
+  ctx.fillStyle = '#7a7368';
+  ctx.beginPath(); ctx.ellipse(sx-8, base-60, 10, 16, 0.2, 0, Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.ellipse(sx+w+8, base-80, 9, 18, -0.2, 0, Math.PI*2); ctx.fill();
+
+  // 入り口の暗がり
+  const og = ctx.createLinearGradient(0, base-110, 0, base);
+  og.addColorStop(0, '#0d0912');
+  og.addColorStop(1, '#241a2e');
+  ctx.fillStyle = og;
+  ctx.beginPath();
+  ctx.moveTo(sx+8, base+2);
+  ctx.lineTo(sx+8, base-70);
+  ctx.arc(sx+w/2, base-70, w/2-8, Math.PI, 0);
+  ctx.lineTo(sx+w-8, base+2);
+  ctx.closePath();
+  ctx.fill();
+
+  // 木の看板
+  ctx.fillStyle = '#b8895a';
+  roundRect(sx+w/2-25, top+16, 50, 22, 5);
+  ctx.fill();
+  ctx.strokeStyle = '#7d5a35';
+  ctx.lineWidth = 2;
+  ctx.stroke();
+  ctx.fillStyle = '#fff6e0';
+  ctx.font = 'bold 14px "Hiragino Maru Gothic ProN","Comic Sans MS",sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText('洞窟', sx+w/2, top+27.5);
+  ctx.textAlign = 'start';
+  ctx.textBaseline = 'alphabetic';
+}
+
+// ---------- 描画：障害物・宝石 ----------
 function drawObstacles(){
   for(const o of obstacles){
     const sx = o.worldX - scrollX;
@@ -417,7 +750,7 @@ function drawObstacles(){
       ctx.fillStyle = '#4a8a3c';
       roundRect(sx+4, top+4, o.w-8, o.h-8, 4);
       ctx.fill();
-    } else {
+    } else if(o.type === 'rock'){
       // 岩
       ctx.fillStyle = '#9a9a9a';
       ctx.beginPath();
@@ -434,7 +767,108 @@ function drawObstacles(){
       ctx.beginPath();
       ctx.ellipse(sx+o.w*0.32, top+o.h*0.4, o.w*0.1, o.h*0.08, 0, 0, Math.PI*2);
       ctx.fill();
+    } else if(o.type === 'stalagmite'){
+      drawStalagmite(sx, top, o);
+    } else if(o.type === 'crystal'){
+      drawCrystal(sx, top, o);
     }
+  }
+}
+
+function drawStalagmite(sx, top, o){
+  const by = top + o.h + 6;
+  // 本体
+  ctx.fillStyle = '#a89793';
+  ctx.beginPath();
+  ctx.moveTo(sx, by);
+  ctx.lineTo(sx + o.w*0.5, top);
+  ctx.lineTo(sx + o.w, by);
+  ctx.closePath();
+  ctx.fill();
+  // 影
+  ctx.fillStyle = '#84726f';
+  ctx.beginPath();
+  ctx.moveTo(sx + o.w*0.5, top);
+  ctx.lineTo(sx + o.w, by);
+  ctx.lineTo(sx + o.w*0.5, by);
+  ctx.closePath();
+  ctx.fill();
+  // 小さい石筍
+  ctx.fillStyle = '#95847f';
+  ctx.beginPath();
+  ctx.moveTo(sx - o.w*0.18, by);
+  ctx.lineTo(sx + o.w*0.12, top + o.h*0.5);
+  ctx.lineTo(sx + o.w*0.36, by);
+  ctx.closePath();
+  ctx.fill();
+  ctx.strokeStyle = '#4a3b3f';
+  ctx.lineWidth = 1.2;
+  ctx.beginPath();
+  ctx.moveTo(sx, by);
+  ctx.lineTo(sx + o.w*0.5, top);
+  ctx.lineTo(sx + o.w, by);
+  ctx.stroke();
+}
+
+function drawCrystal(sx, top, o){
+  const col = CAVE_CRYSTALS[o.hue || 0];
+  const by = top + o.h + 6;
+  const spike = (x0, x1, h, alpha) => {
+    ctx.beginPath();
+    ctx.moveTo(x0, by);
+    ctx.lineTo(x0 + (x1-x0)*0.1, by - h*0.65);
+    ctx.lineTo(x0 + (x1-x0)*0.5, by - h);
+    ctx.lineTo(x0 + (x1-x0)*0.9, by - h*0.65);
+    ctx.lineTo(x1, by);
+    ctx.closePath();
+    ctx.globalAlpha = alpha;
+    ctx.fill();
+    ctx.globalAlpha = 1;
+    ctx.stroke();
+  };
+  ctx.strokeStyle = '#3b2a5a';
+  ctx.lineWidth = 1.2;
+  ctx.fillStyle = col;
+  spike(sx + o.w*0.05, sx + o.w*0.42, o.h*0.75, 0.8);
+  spike(sx + o.w*0.55, sx + o.w*0.98, o.h*0.6, 0.8);
+  spike(sx + o.w*0.25, sx + o.w*0.75, o.h + 6, 1);
+  // ハイライト
+  ctx.fillStyle = 'rgba(255,255,255,0.55)';
+  ctx.beginPath();
+  ctx.moveTo(sx + o.w*0.38, by - 4);
+  ctx.lineTo(sx + o.w*0.36, by - o.h*0.7);
+  ctx.lineTo(sx + o.w*0.44, by - o.h*0.85);
+  ctx.lineTo(sx + o.w*0.44, by - 4);
+  ctx.closePath();
+  ctx.fill();
+}
+
+function drawGems(){
+  for(const g of gems){
+    if(g.taken) continue;
+    const sx = g.worldX - scrollX;
+    if(sx < -20 || sx > W+20) continue;
+    const bob = Math.sin((frame + g.phase)*0.1)*3;
+    const y = g.y + bob;
+    const s = 9 + Math.sin((frame + g.phase)*0.15)*1.2;
+    ctx.fillStyle = '#ffd84a';
+    ctx.strokeStyle = '#b57a00';
+    ctx.lineWidth = 1.2;
+    ctx.beginPath();
+    ctx.moveTo(sx, y - s);
+    ctx.lineTo(sx + s*0.75, y);
+    ctx.lineTo(sx, y + s);
+    ctx.lineTo(sx - s*0.75, y);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+    ctx.fillStyle = '#fff3b0';
+    ctx.beginPath();
+    ctx.moveTo(sx, y - s);
+    ctx.lineTo(sx - s*0.75, y);
+    ctx.lineTo(sx, y);
+    ctx.closePath();
+    ctx.fill();
   }
 }
 
@@ -448,6 +882,7 @@ function roundRect(x,y,w,h,r){
   ctx.closePath();
 }
 
+// ---------- 描画：もぐら ----------
 function drawCat(){
   const x = cat.x, y = cat.y - cat.h;
   const bounce = cat.onGround ? Math.abs(Math.sin(cat.legPhase))*3 : 0;
@@ -584,14 +1019,147 @@ function drawCat(){
   ctx.arc(headCx-headR*0.55, headCy-headR*0.4, headR*0.22, 0, Math.PI*2);
   ctx.fill();
 
+  // 洞窟ではライト付きヘルメット
+  if(stageKey === 'cave'){
+    ctx.fillStyle = '#ffcf3f';
+    ctx.strokeStyle = outline;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.arc(headCx, headCy-headR*0.3, headR*0.92, Math.PI*1.02, Math.PI*1.98);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+    ctx.fillStyle = '#e0a91a';
+    ctx.fillRect(headCx-headR*1.02, headCy-headR*0.35, headR*2.0, 3);
+    ctx.fillStyle = '#fffbe0';
+    ctx.beginPath();
+    ctx.arc(headCx+headR*0.8, headCy-headR*0.55, 2.6, 0, Math.PI*2);
+    ctx.fill();
+    ctx.stroke();
+  }
+
   ctx.restore();
+
+  lamp.x = x + headCx + headR*0.8;
+  lamp.y = y - bounce + headCy - headR*0.55;
+}
+
+// ---------- 描画：洞窟のライティング ----------
+function drawCaveLighting(){
+  // まわりを暗く（もぐらのライトの周りだけ明るい）
+  const vg = ctx.createRadialGradient(lamp.x, lamp.y, 90, lamp.x, lamp.y, 460);
+  vg.addColorStop(0, 'rgba(6,3,14,0)');
+  vg.addColorStop(0.45, 'rgba(6,3,14,0.25)');
+  vg.addColorStop(1, 'rgba(6,3,14,0.68)');
+  ctx.fillStyle = vg;
+  ctx.fillRect(0, 0, W, H);
+
+  // 光るものは暗がりの上から足す
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+
+  // ライトの光線
+  const cone = ctx.createLinearGradient(lamp.x, lamp.y, lamp.x+300, lamp.y);
+  cone.addColorStop(0, 'rgba(255,240,180,0.30)');
+  cone.addColorStop(1, 'rgba(255,240,180,0)');
+  ctx.fillStyle = cone;
+  ctx.beginPath();
+  ctx.moveTo(lamp.x, lamp.y);
+  ctx.lineTo(lamp.x+300, lamp.y-70);
+  ctx.lineTo(lamp.x+300, lamp.y+120);
+  ctx.closePath();
+  ctx.fill();
+
+  // 溶岩の照り返し
+  for(const seg of terrainSegments){
+    if(!seg.gap) continue;
+    const sx0 = seg.x0 - scrollX, sx1 = seg.x1 - scrollX;
+    if(sx1 < 0 || sx0 > W) continue;
+    const x0 = Math.max(sx0-20, 0), x1 = Math.min(sx1+20, W);
+    const lg = ctx.createLinearGradient(0, groundY-70, 0, groundY+10);
+    lg.addColorStop(0, 'rgba(255,120,40,0)');
+    lg.addColorStop(1, 'rgba(255,120,40,0.35)');
+    ctx.fillStyle = lg;
+    ctx.fillRect(x0, groundY-70, x1-x0, 80);
+  }
+
+  // 水晶の光
+  for(const o of obstacles){
+    if(o.type !== 'crystal') continue;
+    const sx = o.worldX - scrollX;
+    if(sx < -60 || sx > W+60) continue;
+    const cx = sx + o.w/2, cy = groundY - o.baseH - o.h*0.5;
+    const tw = 0.75 + 0.25*Math.sin(frame*0.1 + o.worldX);
+    ctx.fillStyle = CAVE_CRYSTALS[o.hue || 0];
+    ctx.globalAlpha = 0.14*tw;
+    ctx.beginPath(); ctx.arc(cx, cy, 34, 0, Math.PI*2); ctx.fill();
+    ctx.globalAlpha = 0.22*tw;
+    ctx.beginPath(); ctx.arc(cx, cy, 20, 0, Math.PI*2); ctx.fill();
+    ctx.globalAlpha = 1;
+  }
+
+  // 宝石の光
+  ctx.fillStyle = '#ffd84a';
+  for(const g of gems){
+    if(g.taken) continue;
+    const sx = g.worldX - scrollX;
+    if(sx < -30 || sx > W+30) continue;
+    const y = g.y + Math.sin((frame + g.phase)*0.1)*3;
+    ctx.globalAlpha = 0.16;
+    ctx.beginPath(); ctx.arc(sx, y, 22, 0, Math.PI*2); ctx.fill();
+    ctx.globalAlpha = 0.25;
+    ctx.beginPath(); ctx.arc(sx, y, 12, 0, Math.PI*2); ctx.fill();
+    ctx.globalAlpha = 1;
+  }
+
+  ctx.restore();
+}
+
+// ---------- 描画：演出（+10 / フェード / ステージ名） ----------
+function drawEffects(){
+  for(const p of pops){
+    ctx.globalAlpha = 1 - p.t/40;
+    ctx.fillStyle = '#ffe680';
+    ctx.strokeStyle = 'rgba(0,0,0,0.5)';
+    ctx.lineWidth = 3;
+    ctx.font = 'bold 16px "Hiragino Maru Gothic ProN","Comic Sans MS",sans-serif';
+    ctx.textAlign = 'center';
+    ctx.strokeText('+10', p.x, p.y - p.t);
+    ctx.fillText('+10', p.x, p.y - p.t);
+  }
+  ctx.globalAlpha = 1;
+
+  if(fade > 0){
+    ctx.fillStyle = `rgba(0,0,0,${fade})`;
+    ctx.fillRect(0, 0, W, H);
+  }
+
+  if(banner.t > 0){
+    const a = Math.min(1, banner.t/25, (BANNER_FRAMES - banner.t)/15);
+    ctx.globalAlpha = Math.max(0, a);
+    ctx.font = 'bold 30px "Hiragino Maru Gothic ProN","Comic Sans MS",sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.lineWidth = 6;
+    ctx.strokeStyle = 'rgba(0,0,0,0.45)';
+    ctx.strokeText(banner.text, W/2, 100);
+    ctx.fillStyle = '#fff';
+    ctx.fillText(banner.text, W/2, 100);
+    ctx.globalAlpha = 1;
+    ctx.textBaseline = 'alphabetic';
+  }
+  ctx.textAlign = 'start';
 }
 
 function draw(){
   drawBackground();
   drawGround();
+  drawGate();
   drawObstacles();
+  drawGems();
   drawCat();
+  if(stageKey === 'cave') drawCaveLighting();
+  drawEffects();
 }
 
 // 固定タイムステップ：60Hz相当でupdateを回し、描画は画面のリフレッシュに合わせる
@@ -610,7 +1178,9 @@ function loop(ts){
 }
 
 // 初期表示
+overlay.innerHTML = MENU_HTML;
 initTerrain();
+applyStageUI();
 drawBackground();
 drawGround();
 drawCat();
@@ -625,7 +1195,14 @@ wrap.addEventListener('pointerdown', (e)=>{
   e.preventDefault();
   jump();
 });
-startBtn.addEventListener('click', startGame);
+// ステージ選択・リトライ・メニューのボタン
+overlay.addEventListener('click', (e)=>{
+  const b = e.target.closest('button');
+  if(!b) return;
+  if(b.dataset.stage) startGame(b.dataset.stage);
+  else if(b.id === 'retryBtn') startGame();
+  else if(b.id === 'menuBtn') showMenu();
+});
 </script>
 </body>
 </html>
