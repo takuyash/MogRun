@@ -2,25 +2,35 @@
 <html lang="ja">
 <head>
 <meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>ダッシュもぐら</title>
 <style>
   * { margin:0; padding:0; box-sizing:border-box; }
   body {
     display:flex; flex-direction:column; align-items:center; justify-content:center;
     min-height:100vh;
+    min-height:100dvh;
+    padding:8px;
+    padding-left:max(8px, env(safe-area-inset-left));
+    padding-right:max(8px, env(safe-area-inset-right));
     background: linear-gradient(#bfe9ff, #eaf9ff);
     font-family: "Hiragino Maru Gothic ProN","Comic Sans MS",sans-serif;
     touch-action: manipulation;
+    -webkit-tap-highlight-color: transparent;
+    -webkit-user-select:none; user-select:none;
   }
   h1 { color:#ff8fab; margin-bottom:10px; text-shadow:1px 1px 0 #fff; }
   #wrap {
     position:relative;
+    width:100%;
+    max-width:800px;
     border-radius:16px;
     overflow:hidden;
     box-shadow:0 8px 24px rgba(0,0,0,0.2);
     border:4px solid #fff;
+    touch-action:none; /* ゲーム領域ではスクロール・ズームを無効化 */
   }
-  canvas { display:block; background:#cdefff; }
+  canvas { display:block; width:100%; height:auto; background:#cdefff; }
   #overlay {
     position:absolute; inset:0;
     display:flex; flex-direction:column; align-items:center; justify-content:center;
@@ -28,6 +38,7 @@
     text-align:center;
     font-size:20px;
     color:#555;
+    padding:8px;
   }
   #overlay.hidden { display:none; }
   button {
@@ -42,8 +53,20 @@
     box-shadow:0 4px 0 #e06e8c;
   }
   button:active { transform:translateY(2px); box-shadow:0 2px 0 #e06e8c; }
-  #hint { margin-top:10px; color:#777; font-size:14px; }
+  #hint { margin-top:10px; color:#777; font-size:14px; text-align:center; }
+  #rotate { display:none; margin-top:8px; color:#ff8fab; font-size:14px; font-weight:bold; text-align:center; }
   #score { position:absolute; top:10px; right:16px; font-size:18px; color:#555; font-weight:bold; text-shadow:1px 1px 0 #fff; }
+
+  @media (max-width:600px){
+    h1 { font-size:20px; margin-bottom:8px; }
+    #overlay { font-size:15px; }
+    #score { font-size:14px; top:6px; right:10px; }
+    button { padding:12px 28px; }
+  }
+  /* スマホ縦持ちのときは横向きを案内 */
+  @media (orientation:portrait) and (max-width:600px){
+    #rotate { display:block; }
+  }
 </style>
 </head>
 <body>
@@ -56,6 +79,7 @@
     <button id="startBtn">はじめる</button>
   </div>
 </div>
+<div id="rotate">📱 スマホを横向きにすると遊びやすいよ！</div>
 <div id="hint">スペースキー・クリック・タップでジャンプ</div>
 
 <script>
@@ -65,6 +89,7 @@ const W = canvas.width, H = canvas.height;
 const groundY = 220; // 高さ0(平坦)のときの地面ライン
 const maxHill = 70;  // 坂の最大高さ
 
+const wrap = document.getElementById('wrap');
 const overlay = document.getElementById('overlay');
 const startBtn = document.getElementById('startBtn');
 const scoreEl = document.getElementById('score');
@@ -75,6 +100,10 @@ let baseSpeed = 6;
 let score = 0;
 let frame = 0;
 let scrollX = 0; // これまでに進んだ距離（ワールド座標）
+
+// 固定タイムステップ用（60Hz相当に統一）
+const STEP = 1000 / 60;
+let last = 0, acc = 0;
 
 // 猫
 const cat = {
@@ -190,7 +219,8 @@ function startGame(){
   resetGame();
   state = 'playing';
   overlay.classList.add('hidden');
-  loop();
+  last = 0; acc = 0;
+  requestAnimationFrame(loop);
 }
 
 function gameOver(){
@@ -564,9 +594,17 @@ function draw(){
   drawCat();
 }
 
-function loop(){
+// 固定タイムステップ：60Hz相当でupdateを回し、描画は画面のリフレッシュに合わせる
+function loop(ts){
   if(state !== 'playing') return;
-  update();
+  if(!last) last = ts;
+  acc += Math.min(ts - last, 100); // タブ復帰時などの急な進みを抑える
+  last = ts;
+  while(acc >= STEP){
+    update();
+    acc -= STEP;
+    if(state !== 'playing') return;
+  }
   draw();
   requestAnimationFrame(loop);
 }
@@ -579,10 +617,14 @@ drawCat();
 
 // 入力
 window.addEventListener('keydown', (e)=>{
-  if(e.code === 'Space'){ e.preventDefault(); jump(); }
+  if(e.code === 'Space'){ e.preventDefault(); if(!e.repeat) jump(); }
 });
-canvas.addEventListener('mousedown', jump);
-canvas.addEventListener('touchstart', (e)=>{ e.preventDefault(); jump(); }, {passive:false});
+// マウス・タッチ・ペンを pointerdown で一本化（ゲーム領域のどこでもジャンプ）
+wrap.addEventListener('pointerdown', (e)=>{
+  if(e.target.closest('button')) return; // ボタンのclickを潰さない
+  e.preventDefault();
+  jump();
+});
 startBtn.addEventListener('click', startGame);
 </script>
 </body>
