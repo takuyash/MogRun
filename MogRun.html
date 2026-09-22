@@ -66,6 +66,8 @@
   button.ghost:active { box-shadow:0 2px 0 #838383; }
   button.sky { background:#3fa4ff; box-shadow:0 4px 0 #2381d6; }
   button.sky:active { box-shadow:0 2px 0 #2381d6; }
+  button.sea { background:#13b3a6; box-shadow:0 4px 0 #0d8a80; }
+  button.sea:active { box-shadow:0 2px 0 #0d8a80; }
   .btnrow { display:flex; gap:12px; flex-wrap:wrap; justify-content:center; margin-top:14px; }
   #hint { margin-top:10px; color:#777; font-size:14px; text-align:center; }
   #rotate { display:none; margin-top:8px; color:#ff8fab; font-size:14px; font-weight:bold; text-align:center; }
@@ -73,6 +75,7 @@
   #stage { position:absolute; top:10px; left:16px; font-size:14px; color:#555; font-weight:bold; text-shadow:1px 1px 0 #fff; }
   #wrap.cave #score, #wrap.cave #stage { color:#f3e9ff; text-shadow:1px 1px 0 #000; }
   #wrap.sky #score, #wrap.sky #stage { color:#fff; text-shadow:1px 1px 0 rgba(0,80,150,0.75); }
+  #wrap.sea #score, #wrap.sea #stage { color:#eafcff; text-shadow:1px 1px 0 rgba(0,40,90,0.85); }
 
   @media (max-width:600px){
     h1 { font-size:20px; margin-bottom:8px; }
@@ -117,12 +120,13 @@ const scoreEl = document.getElementById('score');
 const stageEl = document.getElementById('stage');
 
 // ---------- ステージ設定 ----------
-// 自動ステージ進行：草原 → 洞窟 → 空。各ステージに入ってから dist 点進むと入り口が現れる
+// 自動ステージ進行：草原 → 洞窟 → 空 → 海底。各ステージに入ってから dist 点進むと入り口が現れる
 // 自動で進ませたくない場合は AUTO_ADVANCE を false にする
 const AUTO_ADVANCE = true;
 const ADVANCE = {
   meadow: { to:'cave', dist:400 },
-  cave:   { to:'sky',  dist:500 }
+  cave:   { to:'sky',  dist:500 },
+  sky:    { to:'sea',  dist:500 }
 };
 const BANNER_FRAMES = 110;
 const STAGE_INFO = {
@@ -131,10 +135,12 @@ const STAGE_INFO = {
 };
 
 STAGE_INFO.sky = { label:'STAGE 3 空', banner:'STAGE 3  空', icon:'☁️', name:'空' };
-// 穴の出やすさ（ステージ別の倍率）
+STAGE_INFO.sea = { label:'STAGE 4 海底', banner:'STAGE 4  海底', icon:'🌊', name:'海底' };
+// 穴の出やすさ（ステージ別の倍率）。海底の穴は「海溝」
 STAGE_INFO.meadow.gapMul = 1;
 STAGE_INFO.cave.gapMul = 2;
 STAGE_INFO.sky.gapMul = 1.5;
+STAGE_INFO.sea.gapMul = 1.5;
 
 // ---------- レベル（難易度）設定 ----------
 // baseSpeed/accel   : 走る速さの初期値と、スコアに応じた加速の強さ
@@ -170,11 +176,16 @@ const LEVELS = {
 };
 const CAVE_CRYSTALS = ['#7de3ff', '#ff8ad8', '#b69cff'];
 // 洞窟の障害物は先端がとがっているので、当たり判定を少し内側にする（0.22 = 左右22%ずつ）
-const HIT_INSET = { stalagmite: 0.22, crystal: 0.1, stormcloud: 0.1, tornado: 0.15 };
+const HIT_INSET = { stalagmite: 0.22, crystal: 0.1, stormcloud: 0.1, tornado: 0.15, urchin: 0.15, coral: 0.12 };
+const SEA_CORALS = ['#ff7a90', '#ffa64d', '#c77dff'];
 
 LEVELS.easy.desc.sky = 'ゆっくり・穴すくなめ';
 LEVELS.normal.desc.sky = 'ふつうの速さ';
 LEVELS.hard.desc.sky = 'はやい・穴おおめ';
+
+LEVELS.easy.desc.sea = 'ゆっくり・海溝すくなめ';
+LEVELS.normal.desc.sea = 'ふつうの速さ';
+LEVELS.hard.desc.sea = 'はやい・海溝おおめ';
 
 let stageKey = 'meadow';   // いま遊んでいるステージ
 let startStage = 'meadow'; // 「もういちど」で戻るステージ
@@ -201,6 +212,7 @@ const MENU_HTML =
     '<button data-stage="meadow">🌿 草原<small>坂道と水たまり</small></button>' +
     '<button data-stage="cave" class="cave">🕳️ 洞窟<small>暗闇で宝石あつめ</small></button>' +
     '<button data-stage="sky" class="sky">☁️ 空<small>雲の上をかけぬけろ</small></button>' +
+    '<button data-stage="sea" class="sea">🌊 海底<small>海の底で真珠あつめ</small></button>' +
   '</div>';
 
 let state = 'ready'; // ready, playing, over
@@ -246,7 +258,7 @@ let gate = null;    // 洞窟の入り口 {x, w}
 let fade = 0;       // 黒フェード
 let banner = { text:'', t:0 };
 let stageStartScore = 0; // 今のステージに入った時点のスコア
-let fadeColor = '0,0,0'; // 切り替え時のフェードの色（洞窟=黒、空=白）
+let fadeColor = '0,0,0'; // 切り替え時のフェードの色（洞窟=黒、空=白、海底=青）
 
 function hash(n){
   const s = Math.sin(n*127.1 + 311.7) * 43758.5453;
@@ -326,6 +338,7 @@ function applyStageUI(){
   stageEl.textContent = STAGE_INFO[stageKey].label + ' ・ ' + LEVELS[levelKey].name;
   wrap.classList.toggle('cave', stageKey === 'cave');
   wrap.classList.toggle('sky', stageKey === 'sky');
+  wrap.classList.toggle('sea', stageKey === 'sea');
 }
 
 function showBanner(){
@@ -420,7 +433,7 @@ function enterStage(to){
   stageStartScore = score;
   gate = null;
   fade = 1;
-  fadeColor = (to === 'sky') ? '255,255,255' : '0,0,0';
+  fadeColor = (to === 'sky') ? '255,255,255' : (to === 'sea') ? '30,120,200' : '0,0,0';
   nextSpawnDist = 320;
   applyStageUI();
   showBanner();
@@ -447,6 +460,21 @@ function spawnObstacle(){
     } else {
       const h = 42 + Math.random()*14;
       o = {worldX, w: 22+Math.random()*8, h, type:'tornado', baseH};
+    }
+    obstacles.push(o);
+    if(Math.random() < LEVELS[levelKey].gemChance) spawnGems(worldX + o.w + 40);
+    return;
+  }
+
+  if(stageKey === 'sea'){
+    let o;
+    if(Math.random() < 0.5){
+      const h = 26 + Math.random()*12;
+      o = {worldX, w: 32+Math.random()*10, h, type:'urchin', baseH};
+    } else {
+      const h = 30 + Math.random()*20;
+      o = {worldX, w: 28+Math.random()*10, h, type:'coral', baseH,
+           hue: Math.floor(Math.random()*SEA_CORALS.length)};
     }
     obstacles.push(o);
     if(Math.random() < LEVELS[levelKey].gemChance) spawnGems(worldX + o.w + 40);
@@ -496,7 +524,7 @@ function update(){
   scrollX += speed;
   generateTerrain();
 
-  // 草原 → 洞窟 → 空 の切り替え
+  // 草原 → 洞窟 → 空 → 海底 の切り替え
   if(AUTO_ADVANCE && ADVANCE[stageKey]){
     if(!gate && gatePending()) tryPlaceGate();
     if(gate && scrollX + cat.x >= gate.x + gate.w*0.5) enterStage(gate.to);
@@ -597,6 +625,7 @@ function update(){
 function drawBackground(){
   if(stageKey === 'cave'){ drawCaveBackground(); return; }
   if(stageKey === 'sky'){ drawSkyBackground(); return; }
+  if(stageKey === 'sea'){ drawSeaBackground(); return; }
   ctx.clearRect(0,0,W,H);
   ctx.fillStyle = 'rgba(255,255,255,0.8)';
   for(let i=0;i<3;i++){
@@ -694,6 +723,7 @@ function drawStalactites(L, withCrystals){
 // ---------- 描画：地面 ----------
 function drawGround(){
   if(stageKey === 'sky'){ drawSkyGround(); return; }
+  if(stageKey === 'sea'){ drawSeaGround(); return; }
   const cave = stageKey === 'cave';
   let caveGrad = null;
   if(cave){
@@ -814,6 +844,7 @@ function drawGate(){
   if(sx < -140 || sx > W+40) return;
   const base = groundY - getHeightAt(gate.x + w/2);
   if(gate.to === 'sky'){ drawPortal(sx, w, base); return; }
+  if(gate.to === 'sea'){ drawSeaPortal(sx, w, base); return; }
   const top = base - 150;
 
   // 岩のかたまり
@@ -1104,6 +1135,404 @@ function drawPortal(sx, w, base){
   ctx.textBaseline = 'alphabetic';
 }
 
+// ---------- 描画：海底ステージ ----------
+function drawSeaBackground(){
+  const g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, '#2aa5e0');
+  g.addColorStop(0.5, '#1370b8');
+  g.addColorStop(1, '#083a78');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, W, H);
+
+  drawWhale();
+
+  // 水面から差し込む光のカーテン
+  ctx.fillStyle = 'rgba(255,255,255,0.07)';
+  const span = W + 200;
+  for(let i = 0; i < 6; i++){
+    const raw = i*170 - scrollX*0.06 + Math.sin(frame*0.012 + i)*30;
+    const bx = ((raw % span) + span) % span - 100;
+    const wTop = 26 + (i % 3)*10;
+    ctx.beginPath();
+    ctx.moveTo(bx, 0);
+    ctx.lineTo(bx + wTop, 0);
+    ctx.lineTo(bx + wTop + 120, H);
+    ctx.lineTo(bx + 40, H);
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  // 遠くの海底の丘
+  drawSeaHills(0.15, 200, 40, '#0e5a9c', 0.011, 1);
+  drawSeaHills(0.3, 220, 26, '#0a4682', 0.017, 4);
+
+  drawFishSchools();
+  drawKelp();
+  drawSeaBubbles(0.5, 9, 0.28, 1, 11, 0.5);
+}
+
+// 遠くをゆっくり横切るクジラのシルエット
+function drawWhale(){
+  const span = W + 700;
+  const x = W + 300 - ((scrollX*0.12 + 400) % span);
+  const y = 72 + Math.sin(frame*0.02)*6;
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.lineCap = 'round';
+  // しっぽ（柄 → 尾びれ）
+  ctx.strokeStyle = '#1a7ab8';
+  ctx.lineWidth = 16;
+  ctx.beginPath(); ctx.moveTo(-78, -2); ctx.lineTo(-118, -22 + Math.sin(frame*0.05)*3); ctx.stroke();
+  ctx.fillStyle = '#1a7ab8';
+  ctx.beginPath(); ctx.ellipse(-134, -32, 20, 6, -0.7, 0, Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.ellipse(-116, -42, 20, 6, 0.4, 0, Math.PI*2); ctx.fill();
+  // 体
+  ctx.beginPath(); ctx.ellipse(0, 0, 95, 34, 0, 0, Math.PI*2); ctx.fill();
+  // おなか
+  ctx.fillStyle = '#2b90cc';
+  ctx.beginPath(); ctx.ellipse(8, 14, 78, 16, 0, 0, Math.PI*2); ctx.fill();
+  // 目と胸びれ
+  ctx.fillStyle = '#0f5a92';
+  ctx.beginPath(); ctx.arc(62, -6, 2.6, 0, Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.ellipse(22, 22, 18, 6, 0.5, 0, Math.PI*2); ctx.fill();
+  ctx.restore();
+}
+
+function drawSeaHills(sp, baseY, amp, color, freq, seed){
+  const off = scrollX*sp;
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  ctx.moveTo(0, H);
+  for(let x = 0; x <= W; x += 16){
+    const wx = x + off;
+    const y = baseY - amp*(0.5 + 0.5*Math.sin(wx*freq + seed)) - amp*0.4*Math.sin(wx*freq*2.3 + seed*2);
+    ctx.lineTo(x, y);
+  }
+  ctx.lineTo(W, H);
+  ctx.closePath();
+  ctx.fill();
+}
+
+function drawKelp(){
+  const sp = 0.55, spacing = 95, off = scrollX*sp;
+  const first = Math.floor(off/spacing) - 1;
+  const baseY = groundY + 12;
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+  ctx.lineWidth = 6;
+  for(let i = first; i < first + Math.ceil(W/spacing) + 3; i++){
+    const x = i*spacing - off + (hash(i*3+31)-0.5)*40;
+    const len = 60 + hash(i*5+32)*70;
+    ctx.strokeStyle = hash(i*7+33) > 0.5 ? '#0f8a86' : '#0c7d92';
+    ctx.beginPath();
+    ctx.moveTo(x, baseY);
+    for(let s = 1; s <= 8; s++){
+      const t = s/8;
+      ctx.lineTo(x + Math.sin(frame*0.05 + i + t*3)*10*t, baseY - len*t);
+    }
+    ctx.stroke();
+  }
+  ctx.lineJoin = 'miter';
+}
+
+function drawFish(x, y, s, col, wag){
+  ctx.fillStyle = col;
+  ctx.beginPath();
+  ctx.ellipse(x, y, 8*s, 4.5*s, 0, 0, Math.PI*2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.moveTo(x - 6*s, y);
+  ctx.lineTo(x - 13*s, y - 5*s + wag*s);
+  ctx.lineTo(x - 13*s, y + 5*s + wag*s);
+  ctx.closePath();
+  ctx.fill();
+  ctx.fillStyle = 'rgba(20,50,90,0.8)';
+  ctx.beginPath(); ctx.arc(x + 4*s, y - s, 1.1*s, 0, Math.PI*2); ctx.fill();
+}
+
+// 遠景の小魚の群れ（うすい色で、障害物と見まちがえないように）
+function drawFishSchools(){
+  const cols = ['#7fd0e8', '#f2b6c4', '#e8d28a'];
+  const period = W + 260;
+  ctx.globalAlpha = 0.6;
+  for(let sch = 0; sch < 3; sch++){
+    const d = scrollX*0.45 + sch*331 + 60;
+    const lap = Math.floor(d/period);
+    const x = W + 130 - (d % period);
+    const y = 50 + hash(sch*7 + lap*13)*120;
+    for(let k = 0; k < 5; k++){
+      const fx = x + (k*17 % 50);
+      const fy = y + Math.sin(frame*0.06 + k*1.7)*6 + (k % 2)*12;
+      drawFish(fx, fy, 0.8, cols[sch], Math.sin(frame*0.3 + k)*1.6);
+    }
+  }
+  ctx.globalAlpha = 1;
+}
+
+// ふわふわのぼる泡
+function drawSeaBubbles(sp, n, alpha, sizeMul, seed, rise){
+  const period = H + 40;
+  const span = W + 200;
+  ctx.strokeStyle = `rgba(255,255,255,${alpha})`;
+  ctx.lineWidth = 1.2;
+  for(let i = 0; i < n; i++){
+    const d = frame*rise + hash(i*3+seed)*period;
+    const lap = Math.floor(d/period);
+    const y = H + 20 - (d % period);
+    const raw = hash(i*5 + seed + lap*7)*span - scrollX*sp;
+    const bx = ((raw % span) + span) % span - 100 + Math.sin(frame*0.04 + i)*4;
+    const r = (2 + hash(i*7 + seed + lap)*3.5)*sizeMul;
+    ctx.beginPath();
+    ctx.arc(bx, y, r, 0, Math.PI*2);
+    ctx.stroke();
+  }
+}
+
+function drawSeaGround(){
+  const grad = ctx.createLinearGradient(0, groundY - maxHill, 0, H);
+  grad.addColorStop(0, '#e6d29b');
+  grad.addColorStop(1, '#a88a55');
+
+  for(const seg of terrainSegments){
+    const sx0 = seg.x0 - scrollX, sx1 = seg.x1 - scrollX;
+    if(sx1 < -20 || sx0 > W+20) continue;
+    const cx0 = Math.max(sx0, 0), cx1 = Math.min(sx1, W);
+    const totalLen = seg.x1 - seg.x0;
+
+    if(seg.gap){
+      // 海溝（まっくらな深み）
+      const tg = ctx.createLinearGradient(0, groundY, 0, H);
+      tg.addColorStop(0, '#04214a');
+      tg.addColorStop(1, '#010a1c');
+      ctx.fillStyle = tg;
+      ctx.fillRect(cx0, groundY, cx1-cx0, H-groundY);
+      // 水のゆらぎ
+      ctx.strokeStyle = 'rgba(140,210,255,0.35)';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(cx0+4, groundY+6);
+      for(let wx2 = cx0; wx2 < cx1; wx2 += 14){
+        ctx.lineTo(wx2+7, groundY+6+Math.sin((wx2+scrollX+frame*2)*0.15)*2);
+      }
+      ctx.stroke();
+      // 深みからのぼる泡
+      ctx.strokeStyle = 'rgba(170,225,255,0.6)';
+      ctx.lineWidth = 1.2;
+      for(let k = 0; k < 3; k++){
+        const bx = seg.x0 + hash(seg.x0*0.13 + k)*totalLen - scrollX;
+        if(bx < 0 || bx > W) continue;
+        const by = H - ((frame*0.6 + hash(seg.x0 + k*9)*60) % (H-groundY));
+        ctx.beginPath(); ctx.arc(bx, by, 3, 0, Math.PI*2); ctx.stroke();
+      }
+      // ふちの岩
+      ctx.fillStyle = '#8f8a86';
+      ctx.fillRect(sx0-3, groundY-6, 5, 12);
+      ctx.fillRect(sx1-3, groundY-6, 5, 12);
+      continue;
+    }
+
+    const yAt = (sx) => {
+      const wx = sx + scrollX;
+      const t = (wx - seg.x0) / totalLen;
+      return groundY - (seg.h0 + (seg.h1 - seg.h0)*t);
+    };
+    const cy0 = yAt(cx0), cy1 = yAt(cx1);
+
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.moveTo(cx0, cy0);
+    ctx.lineTo(cx1, cy1);
+    ctx.lineTo(cx1, H);
+    ctx.lineTo(cx0, H);
+    ctx.closePath();
+    ctx.fill();
+
+    ctx.strokeStyle = '#f5e4b0';
+    ctx.lineWidth = 4;
+    ctx.beginPath();
+    ctx.moveTo(cx0, cy0);
+    ctx.lineTo(cx1, cy1);
+    ctx.stroke();
+  }
+
+  // 砂のもよう（さざなみ・小石・貝がら）
+  const startOffset = ((scrollX % 40) + 40) % 40;
+  for(let sx = -startOffset; sx < W; sx += 40){
+    const wx = sx + scrollX;
+    if(isGapAt(wx)) continue;
+    const y = groundY - getHeightAt(wx);
+    const idx = Math.round(wx/40);
+    const r = hash(idx*3 + 2);
+    if(r < 0.35){
+      ctx.strokeStyle = '#c9ae77';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(sx+4, y+10);
+      ctx.quadraticCurveTo(sx+12, y+5, sx+20, y+10);
+      ctx.stroke();
+    } else if(r < 0.65){
+      ctx.fillStyle = '#b39a68';
+      ctx.beginPath();
+      ctx.ellipse(sx+10, y+10+hash(idx)*4, 6, 3, 0, 0, Math.PI*2);
+      ctx.fill();
+    } else if(r < 0.85){
+      ctx.fillStyle = '#f7c6d0';
+      ctx.beginPath();
+      ctx.arc(sx+14, y+13, 6, Math.PI, 0);
+      ctx.closePath();
+      ctx.fill();
+      ctx.strokeStyle = '#e39aab';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(sx+14, y+13); ctx.lineTo(sx+14, y+7);
+      ctx.moveTo(sx+14, y+13); ctx.lineTo(sx+10, y+8.5);
+      ctx.moveTo(sx+14, y+13); ctx.lineTo(sx+18, y+8.5);
+      ctx.stroke();
+    }
+  }
+}
+
+// 手前の演出：水の色味・大きな泡・もぐらから出る泡
+function drawSeaForeground(){
+  ctx.fillStyle = 'rgba(20,110,190,0.08)';
+  ctx.fillRect(0, 0, W, H);
+
+  drawSeaBubbles(1.5, 5, 0.4, 1.6, 71, 0.9);
+
+  const hx = cat.x + 44, hy = cat.y - cat.h + 14;
+  ctx.lineWidth = 1.3;
+  for(let k = 0; k < 4; k++){
+    const p = (frame*1.1 + k*15) % 60;
+    const life = 1 - p/60;
+    const bx = hx - p*0.9 + Math.sin(p*0.25 + k)*2;
+    const by = hy - p*0.75;
+    ctx.strokeStyle = `rgba(255,255,255,${(0.75*life).toFixed(3)})`;
+    ctx.beginPath();
+    ctx.arc(bx, by, 1.5 + (k % 3)*0.8*life + 0.8, 0, Math.PI*2);
+    ctx.stroke();
+  }
+}
+
+// 空 → 海底 のゲート（うずまく水の輪）
+function drawSeaPortal(sx, w, base){
+  const cx = sx + w/2, cy = base - 62;
+  // まわりの光
+  const gl = ctx.createRadialGradient(cx, cy, 10, cx, cy, 95);
+  gl.addColorStop(0, 'rgba(120,235,255,0.75)');
+  gl.addColorStop(0.45, 'rgba(60,170,240,0.4)');
+  gl.addColorStop(1, 'rgba(60,170,240,0)');
+  ctx.fillStyle = gl;
+  ctx.beginPath(); ctx.arc(cx, cy, 95, 0, Math.PI*2); ctx.fill();
+  // 輪
+  ctx.strokeStyle = '#d9f6ff';
+  ctx.lineWidth = 7;
+  ctx.beginPath(); ctx.ellipse(cx, cy, 34, 58, 0, 0, Math.PI*2); ctx.stroke();
+  ctx.strokeStyle = '#36b6e8';
+  ctx.lineWidth = 2.5;
+  ctx.stroke();
+  // 中：うずまく水
+  ctx.save();
+  ctx.beginPath(); ctx.ellipse(cx, cy, 31, 55, 0, 0, Math.PI*2); ctx.clip();
+  const ig = ctx.createLinearGradient(0, cy-55, 0, cy+55);
+  ig.addColorStop(0, '#7fe0ff');
+  ig.addColorStop(1, '#0b4f9c');
+  ctx.fillStyle = ig;
+  ctx.fillRect(cx-32, cy-56, 64, 112);
+  ctx.strokeStyle = 'rgba(255,255,255,0.65)';
+  ctx.lineWidth = 3;
+  ctx.lineCap = 'round';
+  for(let a = 0; a < 3; a++){
+    ctx.beginPath();
+    for(let k = 0; k <= 16; k++){
+      const r = k/16;
+      const ang = a*Math.PI*2/3 + r*3.2 + frame*0.06;
+      const px = cx + Math.cos(ang)*r*32, py = cy + Math.sin(ang)*r*56;
+      if(k === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+    }
+    ctx.stroke();
+  }
+  ctx.restore();
+  // 看板
+  ctx.fillStyle = '#b8895a';
+  roundRect(cx-25, cy-92, 50, 22, 5);
+  ctx.fill();
+  ctx.strokeStyle = '#7d5a35';
+  ctx.lineWidth = 2;
+  ctx.stroke();
+  ctx.fillStyle = '#fff6e0';
+  ctx.font = 'bold 14px "Hiragino Maru Gothic ProN","Comic Sans MS",sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText('海へ', cx, cy-80.5);
+  ctx.textAlign = 'start';
+  ctx.textBaseline = 'alphabetic';
+}
+
+function drawUrchin(sx, top, o){
+  const R = Math.min(o.w*0.28, o.h*0.3);
+  const cx = sx + o.w/2, cy = top + o.h - R*1.1;
+  const n = 14;
+  ctx.strokeStyle = '#3d1a5f';
+  ctx.lineWidth = 2;
+  ctx.lineCap = 'round';
+  ctx.beginPath();
+  for(let k = 0; k < n; k++){
+    const ang = k/n*Math.PI*2 + Math.sin(frame*0.05 + o.worldX)*0.05;
+    const len = R*(k % 2 ? 1.75 : 2.0);
+    ctx.moveTo(cx + Math.cos(ang)*R*0.8, cy + Math.sin(ang)*R*0.8);
+    ctx.lineTo(cx + Math.cos(ang)*len, cy + Math.sin(ang)*len);
+  }
+  ctx.stroke();
+  ctx.fillStyle = '#7a3cae';
+  ctx.lineWidth = 1.2;
+  ctx.beginPath(); ctx.arc(cx, cy, R, 0, Math.PI*2); ctx.fill(); ctx.stroke();
+  ctx.fillStyle = 'rgba(255,255,255,0.35)';
+  ctx.beginPath(); ctx.arc(cx - R*0.3, cy - R*0.35, R*0.28, 0, Math.PI*2); ctx.fill();
+}
+
+function drawCoral(sx, top, o){
+  const col = SEA_CORALS[o.hue || 0];
+  const h = o.h, w = o.w;
+  const cx = sx + w*0.5;
+  const by = top + h + 4;
+  const br = [
+    [cx, by, cx, top + h*0.42, w*0.26],
+    [cx, top + h*0.55, sx + w*0.1, top + h*0.1, w*0.17],
+    [cx, top + h*0.45, sx + w*0.9, top + h*0.04, w*0.17],
+    [cx, top + h*0.42, cx, top + 2, w*0.17]
+  ];
+  ctx.lineCap = 'round';
+  ctx.strokeStyle = '#4a1f3a';
+  for(const [x0, y0, x1, y1, lw] of br){
+    ctx.lineWidth = lw + 2.4;
+    ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y1); ctx.stroke();
+  }
+  ctx.strokeStyle = col;
+  for(const [x0, y0, x1, y1, lw] of br){
+    ctx.lineWidth = lw;
+    ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y1); ctx.stroke();
+  }
+  ctx.fillStyle = 'rgba(255,255,255,0.45)';
+  for(const [, , x1, y1, lw] of br.slice(1)){
+    ctx.beginPath(); ctx.arc(x1 - lw*0.15, y1 - lw*0.1, lw*0.22, 0, Math.PI*2); ctx.fill();
+  }
+}
+
+function drawPearl(cx, cy, s){
+  ctx.fillStyle = 'rgba(255,255,255,0.3)';
+  ctx.beginPath(); ctx.arc(cx, cy, s*1.8, 0, Math.PI*2); ctx.fill();
+  const pg = ctx.createRadialGradient(cx - s*0.3, cy - s*0.35, s*0.1, cx, cy, s*0.95);
+  pg.addColorStop(0, '#ffffff');
+  pg.addColorStop(0.6, '#ffe9f5');
+  pg.addColorStop(1, '#d6b7e6');
+  ctx.fillStyle = pg;
+  ctx.strokeStyle = '#a98cc0';
+  ctx.lineWidth = 1.2;
+  ctx.beginPath(); ctx.arc(cx, cy, s*0.85, 0, Math.PI*2); ctx.fill(); ctx.stroke();
+  ctx.fillStyle = 'rgba(255,255,255,0.9)';
+  ctx.beginPath(); ctx.arc(cx - s*0.28, cy - s*0.3, s*0.2, 0, Math.PI*2); ctx.fill();
+}
+
 // ---------- 描画：障害物・宝石 ----------
 function drawObstacles(){
   for(const o of obstacles){
@@ -1142,6 +1571,10 @@ function drawObstacles(){
       drawStormcloud(sx, top, o);
     } else if(o.type === 'tornado'){
       drawTornado(sx, top, o);
+    } else if(o.type === 'urchin'){
+      drawUrchin(sx, top, o);
+    } else if(o.type === 'coral'){
+      drawCoral(sx, top, o);
     }
   }
 }
@@ -1223,6 +1656,7 @@ function drawGems(){
     const y = g.y + bob;
     const s = 9 + Math.sin((frame + g.phase)*0.15)*1.2;
     if(stageKey === 'sky'){ drawStar(sx, y, s); continue; }
+    if(stageKey === 'sea'){ drawPearl(sx, y, s); continue; }
     ctx.fillStyle = '#ffd84a';
     ctx.strokeStyle = '#b57a00';
     ctx.lineWidth = 1.2;
@@ -1436,6 +1870,40 @@ function drawCat(){
     ctx.beginPath(); ctx.moveTo(headCx - bl, topY - 4); ctx.lineTo(headCx + bl, topY - 4); ctx.stroke();
   }
 
+  // 海底ではシュノーケルとゴーグル
+  if(stageKey === 'sea'){
+    const ex = headCx + headR*0.15, ey = headCy - headR*0.15;
+    ctx.lineCap = 'round';
+    // シュノーケル（ゴーグルのバンドから上へのびる）
+    ctx.strokeStyle = '#ff9f1c';
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.moveTo(headCx - headR*0.55, headCy - headR*0.1);
+    ctx.quadraticCurveTo(headCx - headR*1.15, headCy - headR*0.5, headCx - headR*0.85, headCy - headR*1.6);
+    ctx.stroke();
+    ctx.fillStyle = '#ff5d73';
+    ctx.beginPath(); ctx.arc(headCx - headR*0.85, headCy - headR*1.6, 2.4, 0, Math.PI*2); ctx.fill();
+    // バンド
+    ctx.strokeStyle = '#1f4f8a';
+    ctx.lineWidth = 2.5;
+    ctx.beginPath();
+    ctx.moveTo(ex - headR*0.45, ey);
+    ctx.lineTo(headCx - headR*0.95, headCy - headR*0.1);
+    ctx.stroke();
+    // ガラス
+    ctx.fillStyle = 'rgba(170,230,255,0.55)';
+    ctx.strokeStyle = '#2b6fb8';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.ellipse(ex, ey, headR*0.5, headR*0.4, 0, 0, Math.PI*2);
+    ctx.fill();
+    ctx.stroke();
+    ctx.fillStyle = 'rgba(255,255,255,0.8)';
+    ctx.beginPath();
+    ctx.ellipse(ex - headR*0.15, ey - headR*0.14, headR*0.14, headR*0.07, -0.5, 0, Math.PI*2);
+    ctx.fill();
+  }
+
   ctx.restore();
 
   lamp.x = x + headCx + headR*0.8;
@@ -1577,6 +2045,7 @@ function draw(){
   drawGems();
   drawCat();
   if(stageKey === 'sky') drawWindStreaks();
+  if(stageKey === 'sea') drawSeaForeground();
   if(stageKey === 'cave') drawCaveLighting();
   drawEffects();
 }
