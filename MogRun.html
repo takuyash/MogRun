@@ -77,6 +77,27 @@
   #wrap.sky #score, #wrap.sky #stage { color:#fff; text-shadow:1px 1px 0 rgba(0,80,150,0.75); }
   #wrap.sea #score, #wrap.sea #stage { color:#eafcff; text-shadow:1px 1px 0 rgba(0,40,90,0.85); }
 
+  #dashBtn {
+    position:absolute;
+    right:14px;
+    bottom:14px;
+    width:58px;
+    height:58px;
+    border-radius:50%;
+    padding:0;
+    display:none;
+    align-items:center;
+    justify-content:center;
+    font-size:26px;
+    background:radial-gradient(circle at 35% 30%, #ffb84d, #ff8f2e);
+    box-shadow:0 4px 0 #cc6e10, 0 0 0 3px rgba(255,255,255,0.6);
+    z-index:5;
+    touch-action:none;
+  }
+  #wrap.playing #dashBtn { display:flex; }
+  #dashBtn:active { transform:translateY(2px); box-shadow:0 2px 0 #cc6e10, 0 0 0 3px rgba(255,255,255,0.6); }
+  #dashBtn:disabled { opacity:0.4; filter:grayscale(0.5); box-shadow:0 4px 0 #999, 0 0 0 3px rgba(255,255,255,0.4); }
+
   @media (max-width:600px){
     h1 { font-size:20px; margin-bottom:8px; }
     #overlay { font-size:15px; }
@@ -102,10 +123,11 @@
   <canvas id="game" width="800" height="300"></canvas>
   <div id="stage">STAGE 1 草原</div>
   <div id="score">SCORE: 0</div>
+  <button id="dashBtn" title="ジェットダッシュ">🚀</button>
   <div id="overlay"></div>
 </div>
 <div id="rotate">📱 スマホを横向きにすると遊びやすいよ！</div>
-<div id="hint">スペースキー・クリック・タップでジャンプ</div>
+<div id="hint">スペースキー・クリック・タップでジャンプ／Shiftキーか🚀ボタンでジェットダッシュ</div>
 
 <script>
 const canvas = document.getElementById('game');
@@ -240,7 +262,9 @@ const cat = {
   legPhase: 0,
   runFrame: 0,
   runTimer: 0,
-  falling: false
+  falling: false,
+  dashOffset: 0,
+  dashCharge: 0
 };
 const lamp = { x:0, y:0 }; // ヘルメットのライトの画面座標
 
@@ -259,6 +283,17 @@ let fade = 0;       // 黒フェード
 let banner = { text:'', t:0 };
 let stageStartScore = 0; // 今のステージに入った時点のスコア
 let fadeColor = '0,0,0'; // 切り替え時のフェードの色（洞窟=黒、空=白、海底=青）
+
+// ---------- ジェットダッシュ ----------
+const DASH_COOLDOWN = 85; // フレーム数（約1.4秒）
+const DASH_KICK = 58;     // 一気に前へ進む距離(px)
+
+function tryDash(){
+  if(state !== 'playing') return;
+  if(cat.dashCharge > 0) return;
+  cat.dashOffset += DASH_KICK;
+  cat.dashCharge = DASH_COOLDOWN;
+}
 
 function hash(n){
   const s = Math.sin(n*127.1 + 311.7) * 43758.5453;
@@ -367,6 +402,8 @@ function resetGame(){
   cat.vy = 0;
   cat.onGround = true;
   cat.falling = false;
+  cat.dashOffset = 0;
+  cat.dashCharge = 0;
   nextSpawnDist = 260;
   initTerrain();
   applyStageUI();
@@ -391,6 +428,7 @@ function startGame(stage, level){
   resetGame();
   state = 'playing';
   overlay.classList.add('hidden');
+  wrap.classList.add('playing');
   last = 0; acc = 0;
   requestAnimationFrame(loop);
 }
@@ -400,6 +438,7 @@ function showMenu(){
   menuStep = 'stage';
   overlay.innerHTML = MENU_HTML;
   overlay.classList.remove('hidden');
+  wrap.classList.remove('playing');
 }
 
 function showLevelMenu(stage){
@@ -411,6 +450,7 @@ function showLevelMenu(stage){
 function gameOver(){
   state = 'over';
   overlay.classList.remove('hidden');
+  wrap.classList.remove('playing');
   const total = Math.floor(score + bonus);
   overlay.innerHTML =
     `<div>💥 ざんねん！<br>${STAGE_INFO[stageKey].label} ・ ${LEVELS[levelKey].name}<br>スコア: ${total}</div>` +
@@ -521,18 +561,23 @@ function update(){
   score += speed*0.05;
   speed = baseSpeed + score*LEVELS[levelKey].accel; // 徐々に加速
 
+  // ジェットダッシュの減衰・クールダウン
+  if(cat.dashCharge > 0) cat.dashCharge--;
+  cat.dashOffset *= 0.86;
+  if(Math.abs(cat.dashOffset) < 0.5) cat.dashOffset = 0;
+
   scrollX += speed;
   generateTerrain();
 
   // 草原 → 洞窟 → 空 → 海底 の切り替え
   if(AUTO_ADVANCE && ADVANCE[stageKey]){
     if(!gate && gatePending()) tryPlaceGate();
-    if(gate && scrollX + cat.x >= gate.x + gate.w*0.5) enterStage(gate.to);
+    if(gate && scrollX + cat.x + cat.dashOffset >= gate.x + gate.w*0.5) enterStage(gate.to);
   }
   if(fade > 0) fade = Math.max(0, fade - 0.025);
   if(banner.t > 0) banner.t--;
 
-  const worldXAtCat = scrollX + cat.x;
+  const worldXAtCat = scrollX + cat.x + cat.dashOffset;
   const gapHere = isGapAt(worldXAtCat);
   const surfaceH = getHeightAt(worldXAtCat);
   const surfaceY = groundY - surfaceH;
@@ -593,7 +638,7 @@ function update(){
   }
 
   // 当たり判定
-  const catBox = {x: cat.x+6, y: cat.y-cat.h+6, w: cat.w-14, h: cat.h-10};
+  const catBox = {x: cat.x+cat.dashOffset+6, y: cat.y-cat.h+6, w: cat.w-14, h: cat.h-10};
   for(const o of obstacles){
     const sx = o.worldX - scrollX;
     const obTop = groundY - o.baseH - o.h;
@@ -619,6 +664,7 @@ function update(){
   }
 
   scoreEl.textContent = 'SCORE: ' + Math.floor(score + bonus);
+  dashBtn.disabled = cat.dashCharge > 0;
 }
 
 // ---------- 描画：草原 ----------
@@ -1399,7 +1445,7 @@ function drawSeaForeground(){
 
   drawSeaBubbles(1.5, 5, 0.4, 1.6, 71, 0.9);
 
-  const hx = cat.x + 44, hy = cat.y - cat.h + 14;
+  const hx = cat.x + cat.dashOffset + 44, hy = cat.y - cat.h + 14;
   ctx.lineWidth = 1.3;
   for(let k = 0; k < 4; k++){
     const p = (frame*1.1 + k*15) % 60;
@@ -1690,7 +1736,7 @@ function roundRect(x,y,w,h,r){
 
 // ---------- 描画：もぐら ----------
 function drawCat(){
-  const x = cat.x, y = cat.y - cat.h;
+  const x = cat.x + cat.dashOffset, y = cat.y - cat.h;
   const bounce = cat.onGround ? Math.abs(Math.sin(cat.legPhase))*3 : 0;
 
   ctx.save();
@@ -1740,6 +1786,77 @@ function drawCat(){
   ctx.beginPath();
   ctx.ellipse(cat.w*0.4, cat.h*0.72, cat.w*0.22, cat.h*0.22, 0, 0, Math.PI*2);
   ctx.fill();
+
+  // 背中のジェットパック（いつも背負っている）
+  const jx = cat.w*0.1, jy = cat.h*0.36;
+  const dashT = Math.min(1, cat.dashOffset / DASH_KICK);
+  ctx.fillStyle = '#606b78';
+  roundRect(jx-7, jy-11, 14, 20, 4);
+  ctx.fill();
+  ctx.strokeStyle = outline;
+  ctx.lineWidth = 1;
+  ctx.stroke();
+  ctx.fillStyle = '#3d4650';
+  roundRect(jx-7, jy-11, 14, 6, 3);
+  ctx.fill();
+  ctx.fillStyle = '#ffb347';
+  ctx.beginPath(); ctx.arc(jx-3.5, jy-1, 1.6, 0, Math.PI*2); ctx.fill();
+  // ノズルの炎（ふだんもゆらゆら燃え、ダッシュ中はさらに勢いよく噴射）
+  const idleFlicker = 7 + Math.sin(frame*0.35)*2.5 + Math.sin(frame*0.9)*1.3;
+  const flameLen = dashT > 0.02 ? 15 + 23*dashT : idleFlicker;
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  [jx-3.5, jx+3.5].forEach((nx, i)=>{
+    const wobble = Math.sin(frame*0.5 + i*2)*1.6 + Math.sin(frame*1.3 + i)*0.8;
+    const ny = jy + 9;
+    const hot = dashT > 0.02;
+
+    // 外側のグロー
+    const glowR = flameLen*0.9 + 6;
+    const glow = ctx.createRadialGradient(nx, ny+flameLen*0.35, 1, nx, ny+flameLen*0.35, glowR);
+    glow.addColorStop(0, hot ? 'rgba(255,200,90,0.6)' : 'rgba(255,190,110,0.4)');
+    glow.addColorStop(1, 'rgba(255,150,60,0)');
+    ctx.fillStyle = glow;
+    ctx.beginPath(); ctx.arc(nx, ny+flameLen*0.35, glowR, 0, Math.PI*2); ctx.fill();
+
+    // 外炎（赤オレンジ）
+    ctx.fillStyle = hot ? 'rgba(255,90,30,0.9)' : 'rgba(255,140,60,0.65)';
+    ctx.beginPath();
+    ctx.moveTo(nx-2.8, ny);
+    ctx.quadraticCurveTo(nx-4.2+wobble*0.6, ny+flameLen*0.55, nx+wobble, ny+flameLen);
+    ctx.quadraticCurveTo(nx+4.2+wobble*0.6, ny+flameLen*0.55, nx+2.8, ny);
+    ctx.closePath();
+    ctx.fill();
+
+    // 中炎（オレンジ〜黄）
+    ctx.fillStyle = hot ? 'rgba(255,170,40,0.95)' : 'rgba(255,190,90,0.8)';
+    ctx.beginPath();
+    ctx.moveTo(nx-1.7, ny);
+    ctx.quadraticCurveTo(nx-2.6+wobble*0.7, ny+flameLen*0.5, nx+wobble*0.8, ny+flameLen*0.72);
+    ctx.quadraticCurveTo(nx+2.6+wobble*0.7, ny+flameLen*0.5, nx+1.7, ny);
+    ctx.closePath();
+    ctx.fill();
+
+    // 内炎（黄〜白）
+    ctx.fillStyle = hot ? 'rgba(255,240,190,1)' : 'rgba(255,235,180,0.85)';
+    ctx.beginPath();
+    ctx.moveTo(nx-0.8, ny);
+    ctx.quadraticCurveTo(nx-1+wobble*0.4, ny+flameLen*0.32, nx+wobble*0.3, ny+flameLen*0.46);
+    ctx.quadraticCurveTo(nx+1+wobble*0.4, ny+flameLen*0.32, nx+0.8, ny);
+    ctx.closePath();
+    ctx.fill();
+
+    // 火の粉
+    const emberCount = hot ? 4 : 1;
+    for(let k=0;k<emberCount;k++){
+      const ep = ((frame*3 + k*37 + i*17) % 40) / 40;
+      const ex = nx + Math.sin(frame*0.2 + k*2 + i)*5*ep;
+      const ey = ny + flameLen*0.6 + ep*22;
+      ctx.fillStyle = `rgba(255,${180-Math.floor(ep*100)},${60-Math.floor(ep*40)},${((1-ep)*0.8).toFixed(3)})`;
+      ctx.beginPath(); ctx.arc(ex, ey, 1.2*(1-ep*0.6), 0, Math.PI*2); ctx.fill();
+    }
+  });
+  ctx.restore();
 
   // 前足（腕をつけてから、扇状の爪がある掘る用の手を描く）
   const pawOffset = isOpenPose ? 3 : -1;
@@ -2076,12 +2193,23 @@ drawCat();
 // 入力
 window.addEventListener('keydown', (e)=>{
   if(e.code === 'Space'){ e.preventDefault(); if(!e.repeat) jump(); }
+  if(e.code === 'ShiftLeft' || e.code === 'ShiftRight' || e.code === 'KeyX'){
+    e.preventDefault();
+    if(!e.repeat) tryDash();
+  }
 });
 // マウス・タッチ・ペンを pointerdown で一本化（ゲーム領域のどこでもジャンプ）
 wrap.addEventListener('pointerdown', (e)=>{
   if(e.target.closest('button')) return; // ボタンのclickを潰さない
   e.preventDefault();
   jump();
+});
+// スマホ用ジェットダッシュボタン
+const dashBtn = document.getElementById('dashBtn');
+dashBtn.addEventListener('pointerdown', (e)=>{
+  e.preventDefault();
+  e.stopPropagation();
+  tryDash();
 });
 // ステージ選択・リトライ・メニューのボタン
 overlay.addEventListener('click', (e)=>{
