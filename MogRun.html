@@ -125,6 +125,11 @@
     .btnrow { margin-top:8px; gap:8px; }
     #overlay .sub { margin-top:4px; }
   }
+  /* スマホ横持ち（画面の高さが低い）ときはタイトルを小さくしてゲーム画面を広く */
+  @media (orientation:landscape) and (max-height:500px){
+    body { padding-top:max(4px, env(safe-area-inset-top)); }
+    h1 { font-size:15px; margin-bottom:4px; }
+  }
   /* スマホ縦持ちのときは横向きを案内 */
   @media (orientation:portrait) and (max-width:600px){
     #rotate { display:block; }
