@@ -101,11 +101,22 @@
   #dashBtn:active { transform:translateY(2px); box-shadow:0 2px 0 #cc6e10, 0 0 0 3px rgba(255,255,255,0.6); }
   #dashBtn:disabled { opacity:0.4; filter:grayscale(0.5); box-shadow:0 4px 0 #999, 0 0 0 3px rgba(255,255,255,0.4); }
 
+  /* ジェット燃料ゲージ */
+  #jet { position:absolute; top:32px; left:16px; display:none; align-items:center; gap:5px; font-size:13px; z-index:4; }
+  #wrap.playing #jet { display:flex; }
+  #jetBar { width:96px; height:9px; border-radius:5px; background:rgba(0,0,0,0.22); box-shadow:0 0 0 2px rgba(255,255,255,0.75); overflow:hidden; }
+  #jetFill { height:100%; width:100%; border-radius:5px; background:linear-gradient(90deg, #ff8f2e, #ffd24d); }
+  #jet.empty #jetFill { background:#b8b8b8; }
+  #jet.empty { animation:jetBlink 0.5s steps(2) infinite; }
+  @keyframes jetBlink { 50% { opacity:0.45; } }
+
   @media (max-width:600px){
     h1 { font-size:20px; margin-bottom:8px; }
     #overlay { font-size:15px; }
     #score { font-size:14px; top:6px; right:10px; }
     #stage { font-size:12px; top:7px; left:10px; }
+    #jet { top:25px; left:10px; font-size:11px; }
+    #jetBar { width:72px; height:7px; }
     button { padding:12px 22px; }
     button[data-level] { padding:10px 8px; font-size:13px; }
     button[data-stage] { padding:10px 12px; font-size:14px; }
@@ -126,11 +137,12 @@
   <canvas id="game" width="800" height="300"></canvas>
   <div id="stage">STAGE 1 草原</div>
   <div id="score">SCORE: 0</div>
+  <div id="jet">🚀<div id="jetBar"><div id="jetFill"></div></div></div>
   <button id="dashBtn" title="ジェットダッシュ">🚀</button>
   <div id="overlay"></div>
 </div>
 <div id="rotate">📱 スマホを横向きにすると遊びやすいよ！</div>
-<div id="hint">スペースキー・クリック・タップでジャンプ／Shiftキーか🚀ボタンでジェットダッシュ</div>
+<div id="hint">スペースキー・クリック・タップでジャンプ／Shiftキーか🚀ボタンを押しっぱなしでジェット噴射</div>
 
 <script>
 const canvas = document.getElementById('game');
@@ -142,6 +154,8 @@ const maxHill = 70;  // 坂の最大高さ
 const wrap = document.getElementById('wrap');
 const overlay = document.getElementById('overlay');
 const scoreEl = document.getElementById('score');
+const jetEl = document.getElementById('jet');
+const jetFillEl = document.getElementById('jetFill');
 const stageEl = document.getElementById('stage');
 
 // ---------- ステージ設定 ----------
@@ -279,7 +293,10 @@ const cat = {
   runTimer: 0,
   falling: false,
   dashOffset: 0,
-  dashCharge: 0
+  jetFuel: 100,
+  jetIdle: 0,       // 噴射していないフレーム数
+  jetEmpty: false,  // 燃料切れで回復待ち
+  boosting: false
 };
 const lamp = { x:0, y:0 }; // ヘルメットのライトの画面座標
 
@@ -299,16 +316,17 @@ let banner = { text:'', t:0 };
 let stageStartScore = 0; // 今のステージに入った時点のスコア
 let fadeColor = '0,0,0'; // 切り替え時のフェードの色（洞窟=黒、空=白、海底=青）
 
-// ---------- ジェットダッシュ ----------
-const DASH_COOLDOWN = 85; // フレーム数（約1.4秒）
-const DASH_KICK = 58;     // 一気に前へ進む距離(px)
+// ---------- ジェットダッシュ（押している間ずっと噴射。燃料ゲージ制） ----------
+const DASH_KICK = 58;        // 噴射中に前へ出る距離(px)
+const JET_MAX = 100;         // 燃料の最大値
+const JET_DRAIN = JET_MAX / 150;  // 噴射中の消費（満タンから約2.5秒）
+const JET_REGEN = JET_MAX / 300;  // 回復量（空から満タンまで約5秒）
+const JET_REGEN_DELAY = 40;  // 使い終わってから回復が始まるまで(フレーム)
+const JET_RESTART = 25;      // 空になったあと、ここまで回復すると再び使える
+let jetHeld = false;
 
-function tryDash(){
-  if(state !== 'playing') return;
-  if(cat.dashCharge > 0) return;
-  cat.dashOffset += DASH_KICK;
-  cat.dashCharge = DASH_COOLDOWN;
-}
+function tryDash(){ jetHeld = true; }
+function releaseDash(){ jetHeld = false; }
 
 function hash(n){
   const s = Math.sin(n*127.1 + 311.7) * 43758.5453;
@@ -419,7 +437,11 @@ function resetGame(){
   cat.onGround = true;
   cat.falling = false;
   cat.dashOffset = 0;
-  cat.dashCharge = 0;
+  cat.jetFuel = JET_MAX;
+  cat.jetIdle = 0;
+  cat.jetEmpty = false;
+  cat.boosting = false;
+  jetHeld = false;
   nextSpawnDist = 260;
   initTerrain();
   applyStageUI();
@@ -601,10 +623,20 @@ function update(){
   score += speed*0.05;
   speed = baseSpeed + score*LEVELS[levelKey].accel; // 徐々に加速
 
-  // ジェットダッシュの減衰・クールダウン
-  if(cat.dashCharge > 0) cat.dashCharge--;
-  cat.dashOffset *= 0.86;
-  if(Math.abs(cat.dashOffset) < 0.5) cat.dashOffset = 0;
+  // ジェットダッシュ：押している間は燃料を使って噴射、離すと少しずつ回復
+  cat.boosting = jetHeld && !cat.jetEmpty && cat.jetFuel > 0;
+  if(cat.boosting){
+    cat.jetFuel = Math.max(0, cat.jetFuel - JET_DRAIN);
+    cat.jetIdle = 0;
+    if(cat.jetFuel <= 0) cat.jetEmpty = true;
+    cat.dashOffset += (DASH_KICK - cat.dashOffset) * 0.25;
+  } else {
+    cat.jetIdle++;
+    if(cat.jetIdle > JET_REGEN_DELAY) cat.jetFuel = Math.min(JET_MAX, cat.jetFuel + JET_REGEN);
+    if(cat.jetEmpty && cat.jetFuel >= JET_RESTART) cat.jetEmpty = false;
+    cat.dashOffset *= 0.86;
+    if(Math.abs(cat.dashOffset) < 0.5) cat.dashOffset = 0;
+  }
 
   scrollX += speed;
   generateTerrain();
@@ -642,7 +674,12 @@ function update(){
       cat.vy = 0;
     }
   } else {
-    cat.vy += cat.gravity;
+    // 空中で噴射中はふわっと浮いて、長く飛べる
+    if(cat.boosting && !cat.falling){
+      cat.vy = Math.min(cat.vy + cat.gravity*0.3, 1.2);
+    } else {
+      cat.vy += cat.gravity;
+    }
     cat.y += cat.vy;
 
     if(cat.falling){
@@ -714,7 +751,9 @@ function update(){
   }
 
   scoreEl.textContent = 'SCORE: ' + Math.floor(score + bonus);
-  dashBtn.disabled = cat.dashCharge > 0;
+  dashBtn.disabled = cat.jetEmpty;
+  jetFillEl.style.width = (cat.jetFuel / JET_MAX * 100) + '%';
+  jetEl.classList.toggle('empty', cat.jetEmpty);
 }
 
 // ---------- 描画：草原 ----------
@@ -2689,6 +2728,10 @@ window.addEventListener('keydown', (e)=>{
     if(!e.repeat) tryDash();
   }
 });
+window.addEventListener('keyup', (e)=>{
+  if(e.code === 'ShiftLeft' || e.code === 'ShiftRight' || e.code === 'KeyX') releaseDash();
+});
+window.addEventListener('blur', releaseDash);
 // マウス・タッチ・ペンを pointerdown で一本化（ゲーム領域のどこでもジャンプ）
 wrap.addEventListener('pointerdown', (e)=>{
   if(e.target.closest('button')) return; // ボタンのclickを潰さない
@@ -2700,8 +2743,10 @@ const dashBtn = document.getElementById('dashBtn');
 dashBtn.addEventListener('pointerdown', (e)=>{
   e.preventDefault();
   e.stopPropagation();
+  dashBtn.setPointerCapture(e.pointerId);
   tryDash();
 });
+['pointerup', 'pointercancel', 'lostpointercapture'].forEach(t => dashBtn.addEventListener(t, releaseDash));
 // ステージ選択・リトライ・メニューのボタン
 overlay.addEventListener('click', (e)=>{
   const b = e.target.closest('button');
